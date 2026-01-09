@@ -2,6 +2,7 @@ use crate::output::{AnalysisResult, OutputFormat, print_analysis};
 use anyhow::{Context, Result};
 use pgdrift_core::analyzer::JsonAnalyzer;
 use pgdrift_core::drift::{DriftConfig, detect_drift};
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::{ConnectionPool, Sampler};
 
 /// run performs analysis of a specified jsonb column in a PostgreSQL database
@@ -11,8 +12,18 @@ pub async fn run(
     column: &str,
     sample_size: usize,
     format: OutputFormat,
+    filter: PathFilter,
 ) -> Result<()> {
     let (schema, table) = parse_table_name(table);
+
+    // Show filter info if patterns are active
+    if !filter.patterns().is_empty() {
+        println!(
+            "Applying {} ignore pattern(s): {}",
+            filter.patterns().len(),
+            filter.patterns().join(", ")
+        );
+    }
 
     let conn = ConnectionPool::new(database_url)
         .await
@@ -40,7 +51,7 @@ pub async fn run(
 
     println!("Analyzing {} samples ...", samples.len());
 
-    let mut analyzer = JsonAnalyzer::new();
+    let mut analyzer = JsonAnalyzer::with_filter(filter);
     for sample in &samples {
         analyzer.analyze(sample)
     }

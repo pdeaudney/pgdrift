@@ -277,7 +277,7 @@ async fn test_sampler_handles_null_values() {
 async fn test_sampler_with_text_primary_key() {
     let test_db = TestDb::new().await.expect("Failed to create test database");
 
-    // Create table with TEXT primary key to test fallback from ReservoirPK to Random
+    // Create table with TEXT primary key to test fallback from ReservoirPK to TABLESAMPLE
     sqlx::query(
         "CREATE TABLE test_text_pk (
             slug TEXT PRIMARY KEY,
@@ -303,16 +303,16 @@ async fn test_sampler_with_text_primary_key() {
     }
 
     // Simulate medium-sized table (would trigger ReservoirPK if PK was numeric)
-    // With text PK, should fallback to Random strategy
+    // With text PK, should fallback to TABLESAMPLE strategy for better performance
     let sampler = Sampler::new(&test_db.pool, "public", "test_text_pk", Some(500_000), 50)
         .await
         .expect("Failed to create sampler");
 
     let info = sampler.strategy_info();
-    // Should use Random strategy since text PK can't be used for ReservoirPK
+    // Should use TABLESAMPLE strategy since text PK can't be used for ReservoirPK
     assert!(
-        info.contains("Random sampling"),
-        "Expected Random strategy for text PK, got: {}",
+        info.contains("TABLESAMPLE"),
+        "Expected TABLESAMPLE strategy for text PK in medium table, got: {}",
         info
     );
 
@@ -323,6 +323,65 @@ async fn test_sampler_with_text_primary_key() {
         .expect("Failed to sample table with text primary key");
 
     assert!(!samples.is_empty(), "Expected samples from text PK table");
+    assert!(samples.len() <= 50, "Got more samples than limit");
+
+    // Verify samples are valid JSON
+    for sample in &samples {
+        assert!(sample.is_object(), "Expected JSON object in sample");
+    }
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+#[tokio::test]
+async fn test_sampler_with_uuid_primary_key() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    // Create table with UUID primary key to test fallback from ReservoirPK to TABLESAMPLE
+    sqlx::query(
+        "CREATE TABLE test_uuid_pk (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            metadata JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert some test data
+    for i in 0..100 {
+        sqlx::query("INSERT INTO test_uuid_pk (metadata) VALUES ($1)")
+            .bind(serde_json::json!({
+                "item_id": i,
+                "name": format!("Item {}", i),
+                "value": i * 10
+            }))
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Simulate medium-sized table (would trigger ReservoirPK if PK was numeric)
+    // With UUID PK, should fallback to TABLESAMPLE strategy (~8x faster than Random)
+    let sampler = Sampler::new(&test_db.pool, "public", "test_uuid_pk", Some(500_000), 50)
+        .await
+        .expect("Failed to create sampler");
+
+    let info = sampler.strategy_info();
+    // Should use TABLESAMPLE strategy since UUID PK can't be used for ReservoirPK
+    assert!(
+        info.contains("TABLESAMPLE"),
+        "Expected TABLESAMPLE strategy for UUID PK in medium table, got: {}",
+        info
+    );
+
+    // Verify sampling actually works without errors
+    let samples = sampler
+        .sample(&test_db.pool, "public", "test_uuid_pk", "metadata")
+        .await
+        .expect("Failed to sample table with UUID primary key");
+
+    assert!(!samples.is_empty(), "Expected samples from UUID PK table");
     assert!(samples.len() <= 50, "Got more samples than limit");
 
     // Verify samples are valid JSON

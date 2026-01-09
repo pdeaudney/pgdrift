@@ -2,10 +2,25 @@ use crate::output::{ColumnScanResult, OutputFormat, ScanAllResult};
 use anyhow::{Context, Result};
 use pgdrift_core::analyzer::JsonAnalyzer;
 use pgdrift_core::drift::{DriftConfig, DriftIssue, Severity, detect_drift};
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::{ConnectionPool, Sampler, discover_jsonb_columns};
 
 /// Run scan-all command to analyze all JSONB columns in the given DB
-pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -> Result<()> {
+pub async fn run(
+    database_url: &str,
+    sample_size: usize,
+    format: OutputFormat,
+    filter: PathFilter,
+) -> Result<()> {
+    // Show filter info if patterns are active
+    if !filter.patterns().is_empty() {
+        println!(
+            "Applying {} ignore pattern(s) to all columns: {}\n",
+            filter.patterns().len(),
+            filter.patterns().join(", ")
+        );
+    }
+
     let conn = ConnectionPool::new(database_url)
         .await
         .context("Failed to connect to the database")?;
@@ -44,6 +59,7 @@ pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -
             &col.column,
             sample_size,
             &config,
+            &filter,
         )
         .await
         {
@@ -115,6 +131,7 @@ async fn analyze_column(
     column: &str,
     sample_size: usize,
     config: &DriftConfig,
+    filter: &PathFilter,
 ) -> Result<(usize, Vec<DriftIssue>)> {
     let sampler = Sampler::new(pool, schema, table, None, sample_size)
         .await
@@ -130,7 +147,7 @@ async fn analyze_column(
         anyhow::bail!("No samples found in the column");
     }
 
-    let mut analyzer = JsonAnalyzer::new();
+    let mut analyzer = JsonAnalyzer::with_filter(filter.clone());
     for sample in &samples {
         analyzer.analyze(sample);
     }

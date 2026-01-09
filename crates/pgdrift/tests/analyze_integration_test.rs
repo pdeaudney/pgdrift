@@ -1,5 +1,6 @@
 use pgdrift::commands::analyze;
 use pgdrift::output::OutputFormat;
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::fixtures;
 use pgdrift_db::test_utils::TestDb;
 
@@ -18,7 +19,7 @@ async fn test_analyze_consistent_schema() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -42,7 +43,7 @@ async fn test_analyze_detects_type_inconsistency() {
         "users_mixed_types",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -66,7 +67,7 @@ async fn test_analyze_detects_ghost_keys() {
         "users_sparse",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -90,7 +91,7 @@ async fn test_analyze_handles_deep_nesting() {
         "users_nested",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -114,7 +115,7 @@ async fn test_analyze_with_schema_prefix() {
         "public.users",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -144,6 +145,7 @@ async fn test_analyze_output_formats() {
             "metadata",
             1000,
             format.clone(),
+            PathFilter::new(),
         )
         .await;
 
@@ -169,7 +171,7 @@ async fn test_analyze_invalid_table() {
         "nonexistent_table",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -193,7 +195,7 @@ async fn test_analyze_invalid_column() {
         "users",
         "nonexistent_column",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -224,7 +226,7 @@ async fn test_analyze_empty_column() {
         "empty_table",
         "data",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -254,7 +256,7 @@ async fn test_analyze_detects_schema_evolution() {
         "products",
         "data",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -271,7 +273,7 @@ async fn test_analyze_invalid_database_url() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -310,7 +312,7 @@ async fn test_analyze_all_null_column() {
         "null_table",
         "data",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -363,7 +365,7 @@ async fn test_analyze_mixed_null_values() {
         "mixed_null_table",
         "data",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -399,7 +401,7 @@ async fn test_analyze_sql_injection_table_name() {
             attempt,
             "metadata",
             1000,
-            OutputFormat::Json,
+            OutputFormat::Json, PathFilter::new(),
         )
         .await;
 
@@ -439,7 +441,7 @@ async fn test_analyze_sql_injection_column_name() {
             "users",
             attempt,
             1000,
-            OutputFormat::Json,
+            OutputFormat::Json, PathFilter::new(),
         )
         .await;
 
@@ -501,7 +503,7 @@ async fn test_analyze_large_json_documents() {
         "large_docs",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -567,7 +569,7 @@ async fn test_analyze_unicode_and_special_chars() {
         "unicode_table",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -610,7 +612,7 @@ async fn test_analyze_empty_json_objects() {
         "empty_objects",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -663,7 +665,7 @@ async fn test_analyze_mixed_empty_objects() {
         "mixed_empty",
         "data",
         1000,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -714,7 +716,7 @@ async fn test_analyze_extreme_nesting_depth() {
         "extreme_nesting",
         "data",
         10,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -766,7 +768,7 @@ async fn test_analyze_field_type_mutation() {
         "type_mutation",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -821,7 +823,7 @@ async fn test_analyze_mixed_type_arrays() {
         "mixed_arrays",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 
@@ -876,7 +878,7 @@ async fn test_analyze_inconsistent_nesting_levels() {
         "inconsistent_nesting",
         "data",
         100,
-        OutputFormat::Json,
+        OutputFormat::Json, PathFilter::new(),
     )
     .await;
 

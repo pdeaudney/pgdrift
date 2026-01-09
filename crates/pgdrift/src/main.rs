@@ -48,6 +48,14 @@ enum Commands {
         /// Number of samples to analyze
         #[arg(short, long, default_value = "5000")]
         sample_size: usize,
+
+        /// JSON paths to ignore (can be specified multiple times)
+        #[arg(long = "ignore-path", value_name = "PATTERN")]
+        ignore_paths: Vec<String>,
+
+        /// Path to ignore config file (default: .pgdrift-ignore.toml)
+        #[arg(long = "ignore-config", value_name = "FILE")]
+        ignore_config: Option<String>,
     },
 
     /// Generate index recommendations for a jsonb column
@@ -69,6 +77,14 @@ enum Commands {
         /// Number of samples to analyze
         #[arg(short, long, default_value = "5000")]
         sample_size: usize,
+
+        /// JSON paths to ignore (can be specified multiple times)
+        #[arg(long = "ignore-path", value_name = "PATTERN")]
+        ignore_paths: Vec<String>,
+
+        /// Path to ignore config file (default: .pgdrift-ignore.toml)
+        #[arg(long = "ignore-config", value_name = "FILE")]
+        ignore_config: Option<String>,
     },
 
     /// Scan all jsonb columns in the database for drift
@@ -84,6 +100,14 @@ enum Commands {
         /// Number of samples to analyze per column
         #[arg(short, long, default_value = "5000")]
         sample_size: usize,
+
+        /// JSON paths to ignore (can be specified multiple times)
+        #[arg(long = "ignore-path", value_name = "PATTERN")]
+        ignore_paths: Vec<String>,
+
+        /// Path to ignore config file (default: .pgdrift-ignore.toml)
+        #[arg(long = "ignore-config", value_name = "FILE")]
+        ignore_config: Option<String>,
     },
 }
 
@@ -104,8 +128,12 @@ async fn main() -> anyhow::Result<()> {
             column,
             sample_size,
             format,
+            ignore_paths,
+            ignore_config,
         } => {
-            commands::analyze::run(&database_url, &table, &column, sample_size, format).await?;
+            let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            commands::analyze::run(&database_url, &table, &column, sample_size, format, filter)
+                .await?;
         }
         Commands::Index {
             database_url,
@@ -113,15 +141,22 @@ async fn main() -> anyhow::Result<()> {
             column,
             sample_size,
             format,
+            ignore_paths,
+            ignore_config,
         } => {
-            commands::index::run(&database_url, &table, &column, sample_size, format).await?;
+            let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            commands::index::run(&database_url, &table, &column, sample_size, format, filter)
+                .await?;
         }
         Commands::ScanAll {
             database_url,
             sample_size,
             format,
+            ignore_paths,
+            ignore_config,
         } => {
-            commands::scan_all::run(&database_url, sample_size, format).await?;
+            let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            commands::scan_all::run(&database_url, sample_size, format, filter).await?;
         }
     }
     Ok(())

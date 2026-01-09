@@ -276,6 +276,132 @@ pgdrift analyze users metadata --format json > drift-report.json
 pgdrift analyze users metadata --format markdown > DRIFT_REPORT.md
 ```
 
+### Filtering JSON Paths
+
+pgdrift allows you to exclude specific JSON paths from analysis, which is useful for ignoring sensitive data, debug fields, or internal metadata that you don't want to track.
+
+#### Using CLI Flags
+
+Ignore specific paths using the `--ignore-path` flag (can be used multiple times):
+
+```bash
+# Ignore a single path
+pgdrift analyze users metadata --ignore-path "user.internal.token"
+
+# Ignore multiple paths
+pgdrift analyze users metadata \
+  --ignore-path "user.internal.*" \
+  --ignore-path "debug.logs" \
+  --ignore-path "temp.session_data"
+```
+
+Works with all commands (analyze, index, scan-all):
+
+```bash
+# Generate index recommendations, ignoring internal fields
+pgdrift index users metadata --ignore-path "internal.*"
+
+# Scan all columns, ignoring debug and temporary data
+pgdrift scan-all --database-url $DATABASE_URL \
+  --ignore-path "debug.*" \
+  --ignore-path "temp.*"
+```
+
+#### Using a Configuration File
+
+Create a `.pgdrift-ignore.toml` file in your project directory:
+
+```toml
+# .pgdrift-ignore.toml
+ignore_paths = [
+    "user.internal.*",      # Ignore all internal user data
+    "metadata.debug.*",     # Ignore debug metadata
+    "temp.session_data",    # Ignore specific temp field
+    "analytics.raw_events", # Ignore raw analytics data
+]
+```
+
+pgdrift automatically loads this file if it exists:
+
+```bash
+# Uses .pgdrift-ignore.toml automatically
+pgdrift analyze users metadata
+```
+
+You can also specify a custom config file location:
+
+```bash
+pgdrift analyze users metadata --ignore-config ./custom-ignore.toml
+```
+
+#### Pattern Matching
+
+pgdrift supports two types of patterns:
+
+**Exact match**: Matches only the specific path
+
+```toml
+ignore_paths = ["user.email"]
+```
+
+- Filters: `user.email`
+- Keeps: `user.email.domain`, `user.name`
+
+**Prefix match with wildcard**: Matches a path and all its children
+
+```toml
+ignore_paths = ["user.internal.*"]
+```
+
+- Filters: `user.internal`, `user.internal.id`, `user.internal.token`, `user.internal.metadata.secret`
+- Keeps: `user.email`, `user.name`, `user.external`
+
+**Important notes:**
+
+- Patterns are case-sensitive
+- Array paths like `items[].name` use different notation and won't match `items.*`
+- CLI flags and TOML patterns are merged (not replaced)
+
+#### Common Use Cases
+
+**Ignoring sensitive data:**
+
+```toml
+ignore_paths = [
+    "user.ssn",
+    "payment.credit_card",
+    "credentials.*",
+]
+```
+
+**Ignoring debug/internal fields:**
+
+```toml
+ignore_paths = [
+    "debug.*",
+    "internal.*",
+    "_metadata.*",
+]
+```
+
+**Ignoring temporary or cache data:**
+
+```toml
+ignore_paths = [
+    "temp.*",
+    "cache.*",
+    "session_data",
+]
+```
+
+**Combining CLI and file:**
+
+```bash
+# .pgdrift-ignore.toml has: ["internal.*", "debug.*"]
+# This adds "temp.*" to the filter list
+pgdrift analyze users metadata --ignore-path "temp.*"
+```
+
 ### Adaptive Sampling Strategies
 
 pgdrift uses adaptive sampling strategies based on table size:

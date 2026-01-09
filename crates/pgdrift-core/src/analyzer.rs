@@ -1,3 +1,4 @@
+use crate::filter::PathFilter;
 use crate::stats::FieldStats;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -5,6 +6,7 @@ use std::collections::HashMap;
 pub struct JsonAnalyzer {
     stats: HashMap<String, FieldStats>,
     total_samples: u64,
+    filter: PathFilter,
 }
 
 impl Default for JsonAnalyzer {
@@ -18,6 +20,16 @@ impl JsonAnalyzer {
         Self {
             stats: HashMap::new(),
             total_samples: 0,
+            filter: PathFilter::new(),
+        }
+    }
+
+    /// Create a new analyzer with a path filter
+    pub fn with_filter(filter: PathFilter) -> Self {
+        Self {
+            stats: HashMap::new(),
+            total_samples: 0,
+            filter,
         }
     }
 
@@ -37,6 +49,11 @@ impl JsonAnalyzer {
                     } else {
                         format!("{}.{}", path, key)
                     };
+
+                    // Check if this path should be ignored
+                    if self.filter.should_ignore(&field_path) {
+                        continue; // Skip this path and its children
+                    }
 
                     self.record_field(&field_path, val, depth + 1);
 
@@ -246,5 +263,181 @@ mod tests {
 
         // Should limit to 10 examples
         assert_eq!(value_stats.examples.len(), 10);
+    }
+
+    #[test]
+    fn test_filter_exact_match() {
+        use crate::filter::PathFilter;
+
+        let filter = PathFilter::with_patterns(vec!["user.email".to_string()]);
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "user": {
+                "name": "Alice",
+                "email": "alice@example.com",
+                "age": 30
+            }
+        }));
+
+        let stats = analyzer.finalize();
+
+        // Should include user and user.name and user.age
+        assert!(stats.contains_key("user"));
+        assert!(stats.contains_key("user.name"));
+        assert!(stats.contains_key("user.age"));
+
+        // Should NOT include user.email (exact match filtered)
+        assert!(!stats.contains_key("user.email"));
+    }
+
+    #[test]
+    fn test_filter_prefix_match() {
+        use crate::filter::PathFilter;
+
+        let filter = PathFilter::with_patterns(vec!["user.internal.*".to_string()]);
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "user": {
+                "name": "Alice",
+                "internal": {
+                    "id": 123,
+                    "token": "secret"
+                },
+                "email": "alice@example.com"
+            }
+        }));
+
+        let stats = analyzer.finalize();
+
+        // Should include user, user.name, user.email
+        assert!(stats.contains_key("user"));
+        assert!(stats.contains_key("user.name"));
+        assert!(stats.contains_key("user.email"));
+
+        // Should NOT include user.internal or its children (prefix match filtered)
+        assert!(!stats.contains_key("user.internal"));
+        assert!(!stats.contains_key("user.internal.id"));
+        assert!(!stats.contains_key("user.internal.token"));
+    }
+
+    #[test]
+    fn test_filter_multiple_patterns() {
+        use crate::filter::PathFilter;
+
+        let filter = PathFilter::with_patterns(vec![
+            "debug.*".to_string(),
+            "temp.session".to_string(),
+        ]);
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "user": "Alice",
+            "debug": {
+                "logs": "verbose",
+                "trace": true
+            },
+            "temp": {
+                "session": "xyz",
+                "cache": "data"
+            }
+        }));
+
+        let stats = analyzer.finalize();
+
+        // Should include user and temp.cache
+        assert!(stats.contains_key("user"));
+        assert!(stats.contains_key("temp"));
+        assert!(stats.contains_key("temp.cache"));
+
+        // Should NOT include debug.* (prefix) or temp.session (exact)
+        assert!(!stats.contains_key("debug"));
+        assert!(!stats.contains_key("debug.logs"));
+        assert!(!stats.contains_key("debug.trace"));
+        assert!(!stats.contains_key("temp.session"));
+    }
+
+    #[test]
+    fn test_filter_nested_filtering() {
+        use crate::filter::PathFilter;
+
+        let filter = PathFilter::with_patterns(vec!["metadata.internal.*".to_string()]);
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "metadata": {
+                "title": "Document",
+                "internal": {
+                    "draft": true,
+                    "private": {
+                        "notes": "confidential"
+                    }
+                }
+            }
+        }));
+
+        let stats = analyzer.finalize();
+
+        // Should include metadata and metadata.title
+        assert!(stats.contains_key("metadata"));
+        assert!(stats.contains_key("metadata.title"));
+
+        // Should NOT include metadata.internal or ANY of its descendants
+        assert!(!stats.contains_key("metadata.internal"));
+        assert!(!stats.contains_key("metadata.internal.draft"));
+        assert!(!stats.contains_key("metadata.internal.private"));
+        assert!(!stats.contains_key("metadata.internal.private.notes"));
+    }
+
+    #[test]
+    fn test_filter_with_specific_paths() {
+        use crate::filter::PathFilter;
+
+        // Test that filtering is applied to specific paths only
+        let filter = PathFilter::with_patterns(vec!["items.metadata".to_string()]);
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "items": [
+                {"name": "Item 1"},
+                {"name": "Item 2"}
+            ],
+            "items.metadata": "should be filtered"
+        }));
+
+        let stats = analyzer.finalize();
+
+        // items and items[].name should NOT be filtered
+        assert!(stats.contains_key("items"));
+        assert!(stats.contains_key("items[].name"));
+
+        // items.metadata SHOULD be filtered (exact match)
+        assert!(!stats.contains_key("items.metadata"));
+    }
+
+    #[test]
+    fn test_empty_filter() {
+        use crate::filter::PathFilter;
+
+        let filter = PathFilter::new();
+        let mut analyzer = JsonAnalyzer::with_filter(filter);
+
+        analyzer.analyze(&json!({
+            "name": "Alice",
+            "email": "alice@example.com",
+            "nested": {
+                "value": 123
+            }
+        }));
+
+        let stats = analyzer.finalize();
+
+        // With empty filter, all fields should be included
+        assert_eq!(stats.len(), 4); // name, email, nested, nested.value
+        assert!(stats.contains_key("name"));
+        assert!(stats.contains_key("email"));
+        assert!(stats.contains_key("nested"));
+        assert!(stats.contains_key("nested.value"));
     }
 }
