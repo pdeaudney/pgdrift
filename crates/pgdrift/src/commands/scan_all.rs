@@ -10,6 +10,8 @@ pub async fn run(
     database_url: &str,
     sample_size: usize,
     format: OutputFormat,
+    schema_filter: Option<String>,
+    table_filter: Option<String>,
     filter: PathFilter,
 ) -> Result<()> {
     // Show filter info if patterns are active
@@ -29,9 +31,19 @@ pub async fn run(
         .await
         .context("Failed to test the database connection")?;
 
-    let columns = discover_jsonb_columns(conn.pool())
+    let mut columns = discover_jsonb_columns(conn.pool())
         .await
         .context("Failed to discover JSONB columns")?;
+
+    // Apply schema filter if provided
+    if let Some(ref schema) = schema_filter {
+        columns.retain(|col| col.schema == *schema);
+    }
+
+    // Apply table filter if provided
+    if let Some(ref table) = table_filter {
+        columns.retain(|col| col.table == *table);
+    }
 
     if columns.is_empty() {
         println!("No JSONB columns found in the database.");

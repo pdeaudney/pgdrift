@@ -101,6 +101,14 @@ enum Commands {
         #[arg(short, long, default_value = "5000")]
         sample_size: usize,
 
+        /// Only scan columns in this schema
+        #[arg(long = "schema", value_name = "SCHEMA")]
+        schema: Option<String>,
+
+        /// Only scan columns in this table
+        #[arg(long = "table", value_name = "TABLE")]
+        table: Option<String>,
+
         /// JSON paths to ignore (can be specified multiple times)
         #[arg(long = "ignore-path", value_name = "PATTERN")]
         ignore_paths: Vec<String>,
@@ -152,11 +160,14 @@ async fn main() -> anyhow::Result<()> {
             database_url,
             sample_size,
             format,
+            schema,
+            table,
             ignore_paths,
             ignore_config,
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
-            commands::scan_all::run(&database_url, sample_size, format, filter).await?;
+            commands::scan_all::run(&database_url, sample_size, format, schema, table, filter)
+                .await?;
         }
     }
     Ok(())

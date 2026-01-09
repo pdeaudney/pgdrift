@@ -203,6 +203,27 @@ Column Details:
   • public.users.metadata
 ```
 
+#### Filtering by Schema or Table
+
+You can filter scan-all to analyze only specific schemas or tables:
+
+**Filter by schema:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --schema public
+```
+
+**Filter by table:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --table users
+```
+
+**Filter by both schema and table:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --schema public --table users
+```
+
+This is useful when you have a large database and only want to analyze specific tables or schemas, or when you want to focus on a particular area of your database.
+
 ### Generating Index Recommendations
 
 Get PostgreSQL index recommendations for JSONB fields:
