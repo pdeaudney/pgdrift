@@ -57,11 +57,9 @@ impl SamplingStrategy {
                     Ok(pk) => Self::ReservoirPK { sample_size, pk },
                     Err(_) => {
                         // No numeric PK found (table may have UUID, text PK, or no PK)
-                        // Use TABLESAMPLE for better performance than ORDER BY random()
-                        // TABLESAMPLE BERNOULLI is ~8x faster than Random for medium tables
-                        let pct = (sample_size as f32 / row_count as f32 * 100.0).clamp(0.1, 100.0);
-                        Self::TableSample {
-                            percentage: pct,
+                        // Fallback to Random sampling - more compatible than TABLESAMPLE
+                        // TABLESAMPLE can fail on certain table types and PostgreSQL versions
+                        Self::Random {
                             limit: sample_size,
                         }
                     }

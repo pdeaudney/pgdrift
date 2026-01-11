@@ -69,6 +69,7 @@ pub async fn run(
             &col.schema,
             &col.table,
             &col.column,
+            col.estimated_rows,
             sample_size,
             &config,
             &filter,
@@ -141,11 +142,13 @@ async fn analyze_column(
     schema: &str,
     table: &str,
     column: &str,
+    estimated_rows: Option<i64>,
     sample_size: usize,
     config: &DriftConfig,
     filter: &PathFilter,
 ) -> Result<(usize, Vec<DriftIssue>)> {
-    let sampler = Sampler::new(pool, schema, table, None, sample_size)
+    // Use estimated_rows from discovery to avoid expensive COUNT(*) queries
+    let sampler = Sampler::new(pool, schema, table, estimated_rows, sample_size)
         .await
         .context("Failed to create sampler")?
         .show_progress(false);
@@ -153,7 +156,12 @@ async fn analyze_column(
     let samples = sampler
         .sample(pool, schema, table, column)
         .await
-        .context("Failed to sample data")?;
+        .with_context(|| {
+            format!(
+                "Failed to sample data from {}.{}.{} using strategy: {}",
+                schema, table, column, sampler.strategy_info()
+            )
+        })?;
 
     if samples.is_empty() {
         anyhow::bail!("No samples found in the column");

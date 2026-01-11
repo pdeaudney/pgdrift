@@ -303,16 +303,16 @@ async fn test_sampler_with_text_primary_key() {
     }
 
     // Simulate medium-sized table (would trigger ReservoirPK if PK was numeric)
-    // With text PK, should fallback to TABLESAMPLE strategy for better performance
+    // With text PK, should fallback to Random strategy for better compatibility
     let sampler = Sampler::new(&test_db.pool, "public", "test_text_pk", Some(500_000), 50)
         .await
         .expect("Failed to create sampler");
 
     let info = sampler.strategy_info();
-    // Should use TABLESAMPLE strategy since text PK can't be used for ReservoirPK
+    // Should use Random strategy since text PK can't be used for ReservoirPK
     assert!(
-        info.contains("TABLESAMPLE"),
-        "Expected TABLESAMPLE strategy for text PK in medium table, got: {}",
+        info.contains("Random sampling"),
+        "Expected Random strategy for text PK in medium table, got: {}",
         info
     );
 
@@ -362,16 +362,16 @@ async fn test_sampler_with_uuid_primary_key() {
     }
 
     // Simulate medium-sized table (would trigger ReservoirPK if PK was numeric)
-    // With UUID PK, should fallback to TABLESAMPLE strategy (~8x faster than Random)
+    // With UUID PK, should fallback to Random strategy for better compatibility
     let sampler = Sampler::new(&test_db.pool, "public", "test_uuid_pk", Some(500_000), 50)
         .await
         .expect("Failed to create sampler");
 
     let info = sampler.strategy_info();
-    // Should use TABLESAMPLE strategy since UUID PK can't be used for ReservoirPK
+    // Should use Random strategy since UUID PK can't be used for ReservoirPK
     assert!(
-        info.contains("TABLESAMPLE"),
-        "Expected TABLESAMPLE strategy for UUID PK in medium table, got: {}",
+        info.contains("Random sampling"),
+        "Expected Random strategy for UUID PK in medium table, got: {}",
         info
     );
 
