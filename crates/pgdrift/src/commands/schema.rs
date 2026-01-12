@@ -74,6 +74,7 @@ pub async fn run(
     for sample in &samples {
         analyzer.analyze(sample);
     }
+    let is_root_array = analyzer.is_root_array();
     let stats = analyzer.finalize();
     let field_stats: Vec<_> = stats.values().cloned().collect();
 
@@ -89,6 +90,7 @@ pub async fn run(
         &field_stats,
         Some(format!("{}.{}.{} schema", schema_name, table_name, column)),
         samples.len() as u64,
+        is_root_array,
     );
 
     println!(

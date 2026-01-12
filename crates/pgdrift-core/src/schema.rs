@@ -17,6 +17,8 @@ pub struct SchemaConfig {
     pub strict_additional_properties: bool,
     /// Whether to detect and set format hints (default: true)
     pub detect_formats: bool,
+    /// Ghost key threshold - keys with density <= this are considered unstable/dynamic (default: 0.10)
+    pub ghost_key_threshold: f64,
 }
 
 impl Default for SchemaConfig {
@@ -27,6 +29,7 @@ impl Default for SchemaConfig {
             enum_min_density: 0.8,
             strict_additional_properties: false,
             detect_formats: true,
+            ghost_key_threshold: 0.10,
         }
     }
 }
@@ -188,6 +191,7 @@ pub struct JsonSchema {
     #[serde(rename = "type")]
     pub schema_type: String,
 
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub properties: HashMap<String, PropertySchema>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -195,6 +199,12 @@ pub struct JsonSchema {
 
     #[serde(rename = "additionalProperties")]
     pub additional_properties: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<PropertySchema>>,
+
+    #[serde(rename = "patternProperties", skip_serializing_if = "Option::is_none")]
+    pub pattern_properties: Option<HashMap<String, PropertySchema>>,
 }
 
 impl JsonSchema {
@@ -225,9 +235,29 @@ impl SchemaGenerator {
         stats: &[FieldStats],
         schema_name: Option<String>,
         total_samples: u64,
+        is_root_array: bool,
     ) -> JsonSchema {
-        // Build nested property tree (now handles both regular and array paths)
-        let (root_properties, required_fields) = self.build_property_tree(stats);
+        if is_root_array {
+            // Root is an array - generate array schema with items
+            self.generate_root_array_schema(stats, schema_name, total_samples)
+        } else {
+            // Root is an object - generate object schema with properties
+            self.generate_root_object_schema(stats, schema_name, total_samples)
+        }
+    }
+
+    /// Generate schema when root is an object
+    fn generate_root_object_schema(
+        &self,
+        stats: &[FieldStats],
+        schema_name: Option<String>,
+        total_samples: u64,
+    ) -> JsonSchema {
+        // Detect pattern properties at root level (based on ghost keys)
+        let (pattern_properties, excluded_keys) = self.detect_pattern_properties(stats, "");
+
+        // Build nested property tree (excluding keys that match patterns)
+        let (root_properties, required_fields) = self.build_property_tree(stats, &excluded_keys);
 
         JsonSchema {
             schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
@@ -240,13 +270,298 @@ impl SchemaGenerator {
             properties: root_properties,
             required: required_fields,
             additional_properties: !self.config.strict_additional_properties,
+            items: None,
+            pattern_properties: if pattern_properties.is_empty() {
+                None
+            } else {
+                Some(pattern_properties)
+            },
         }
     }
 
+    /// Generate schema when root is an array
+    fn generate_root_array_schema(
+        &self,
+        stats: &[FieldStats],
+        schema_name: Option<String>,
+        total_samples: u64,
+    ) -> JsonSchema {
+        // Find the root array stats (path "[]")
+        let root_array_stat = stats.iter().find(|s| s.path == "[]");
+
+        // Determine the array items type
+        let items_schema = if let Some(root_stat) = root_array_stat {
+            // Check dominant type of array items
+            let dominant_type = root_stat
+                .types
+                .iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(t, _)| *t);
+
+            match dominant_type {
+                Some(crate::types::JsonType::Object) => {
+                    // Array of objects - build items schema from nested paths
+                    self.build_array_items_schema(stats)
+                }
+                _ => {
+                    // Array of primitives (strings, numbers, etc.)
+                    Some(Box::new(PropertySchema::from_field_stats(
+                        root_stat,
+                        &self.config,
+                    )))
+                }
+            }
+        } else {
+            // No root array stats, try to infer from nested paths
+            self.build_array_items_schema(stats)
+        };
+
+        JsonSchema {
+            schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
+            title: schema_name,
+            description: Some(format!(
+                "Auto-generated schema from pgdrift analysis ({} samples)",
+                total_samples
+            )),
+            schema_type: "array".to_string(),
+            properties: HashMap::new(),
+            required: vec![],
+            additional_properties: !self.config.strict_additional_properties,
+            items: items_schema,
+            pattern_properties: None,
+        }
+    }
+
+    /// Detect pattern properties at a given path level
+    /// Returns (pattern_properties, excluded_keys) where excluded_keys should not appear in regular properties
+    fn detect_pattern_properties(
+        &self,
+        stats: &[FieldStats],
+        path_prefix: &str,
+    ) -> (HashMap<String, PropertySchema>, Vec<String>) {
+        use std::collections::HashMap;
+
+        // Group stats by the next key segment after the prefix
+        // Only consider keys that are ghost keys (low density)
+        let mut key_groups: HashMap<String, Vec<&FieldStats>> = HashMap::new();
+        let mut key_densities: HashMap<String, f64> = HashMap::new();
+
+        for stat in stats {
+            // Skip if not at this prefix level
+            let key_name = if path_prefix.is_empty() {
+                // Root level - first segment is the key
+                if let Some(first_part) = stat.path.split('.').next() {
+                    if !first_part.contains('[') {
+                        Some(first_part.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                // Nested level - check if path starts with prefix
+                let prefix_with_dot = format!("{}.", path_prefix);
+                if stat.path.starts_with(&prefix_with_dot) {
+                    let remaining = &stat.path[prefix_with_dot.len()..];
+                    if let Some(next_part) = remaining.split('.').next() {
+                        if !next_part.contains('[') {
+                            Some(next_part.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(key) = key_name {
+                key_groups.entry(key.clone()).or_default().push(stat);
+
+                // Track density - use the stat's density if it's the key itself
+                if path_prefix.is_empty() && stat.path == key {
+                    key_densities.insert(key.clone(), stat.density);
+                } else if !path_prefix.is_empty()
+                    && stat.path == format!("{}.{}", path_prefix, key) {
+                    key_densities.insert(key.clone(), stat.density);
+                }
+            }
+        }
+
+        // Detect patterns in the keys, but only for ghost keys
+        let mut pattern_groups: HashMap<KeyPattern, Vec<(String, Vec<&FieldStats>)>> =
+            HashMap::new();
+
+        for (key, stats_list) in key_groups {
+            // Check if this is a ghost key (low density)
+            let is_ghost_key = key_densities
+                .get(&key)
+                .map(|d| *d <= self.config.ghost_key_threshold)
+                .unwrap_or(false);
+
+            if is_ghost_key {
+                if let Some(pattern) = KeyPattern::detect(&key) {
+                    pattern_groups
+                        .entry(pattern)
+                        .or_default()
+                        .push((key, stats_list));
+                }
+            }
+        }
+
+        // Build pattern properties for patterns with >= 2 keys
+        let mut pattern_properties = HashMap::new();
+        let mut excluded_keys = Vec::new();
+
+        for (pattern, key_stats_list) in pattern_groups {
+            if key_stats_list.len() >= 2 {
+                // Multiple keys match this pattern - use patternProperties
+                let regex = pattern.to_regex();
+
+                // Build the value schema from all nested paths
+                let value_schema = self.build_pattern_value_schema(stats, path_prefix, &key_stats_list);
+
+                pattern_properties.insert(regex, value_schema);
+
+                // Mark these keys for exclusion from regular properties
+                for (key, _) in key_stats_list {
+                    excluded_keys.push(key);
+                }
+            }
+        }
+
+        (pattern_properties, excluded_keys)
+    }
+
+    /// Build the value schema for a pattern property
+    fn build_pattern_value_schema(
+        &self,
+        all_stats: &[FieldStats],
+        path_prefix: &str,
+        key_stats_list: &[(String, Vec<&FieldStats>)],
+    ) -> PropertySchema {
+        // Collect all nested properties across all keys matching the pattern
+        let mut nested_properties: HashMap<String, PropertySchema> = HashMap::new();
+        let mut nested_required: Vec<String> = Vec::new();
+
+        // For each UUID key, get its nested fields
+        for (key, _stats) in key_stats_list {
+            let key_prefix = if path_prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{}", path_prefix, key)
+            };
+
+            // Find all stats that are nested under this UUID key
+            for stat in all_stats {
+                if stat.path.starts_with(&format!("{}.", key_prefix)) {
+                    let remaining = &stat.path[key_prefix.len() + 1..];
+                    let parts: Vec<&str> = remaining.split('.').collect();
+
+                    if !parts.is_empty() && parts.len() == 1 {
+                        // Direct child property
+                        let field_name = parts[0];
+                        if !field_name.contains('[') {
+                            let prop_schema = PropertySchema::from_field_stats(stat, &self.config);
+                            nested_properties.insert(field_name.to_string(), prop_schema);
+
+                            if stat.density >= self.config.required_threshold {
+                                if !nested_required.contains(&field_name.to_string()) {
+                                    nested_required.push(field_name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        nested_required.sort();
+        nested_required.dedup();
+
+        PropertySchema {
+            property_type: Some(PropertyType::Single("object".to_string())),
+            description: Some(format!(
+                "Dynamic keys matching pattern ({} keys detected)",
+                key_stats_list.len()
+            )),
+            format: None,
+            enum_values: None,
+            minimum: None,
+            maximum: None,
+            pattern: None,
+            properties: Some(nested_properties),
+            additional_properties: Some(!self.config.strict_additional_properties),
+            items: None,
+        }
+    }
+
+    /// Build items schema for root-level array from nested field paths
+    fn build_array_items_schema(&self, stats: &[FieldStats]) -> Option<Box<PropertySchema>> {
+        // Filter for paths that start with "[]." (nested in root array)
+        let nested_stats: Vec<_> = stats
+            .iter()
+            .filter(|s| s.path.starts_with("[]."))
+            .collect();
+
+        if nested_stats.is_empty() {
+            // No nested fields, might be array of primitives
+            return None;
+        }
+
+        // Build properties for the object inside the array
+        let mut properties = HashMap::new();
+        let mut required_fields = Vec::new();
+
+        for stat in nested_stats {
+            // Remove "[]." prefix to get the field name
+            let field_path = &stat.path[3..];
+            let parts: Vec<&str> = field_path.split('.').collect();
+
+            if parts.is_empty() {
+                continue;
+            }
+
+            let field_name = parts[0];
+
+            if parts.len() == 1 {
+                // Top-level field in the array item
+                let property_schema = PropertySchema::from_field_stats(stat, &self.config);
+                properties.insert(field_name.to_string(), property_schema);
+
+                if stat.density >= self.config.required_threshold {
+                    required_fields.push(field_name.to_string());
+                }
+            }
+            // TODO: Handle nested objects within array items if needed
+        }
+
+        required_fields.sort();
+        required_fields.dedup();
+
+        Some(Box::new(PropertySchema {
+            property_type: Some(PropertyType::Single("object".to_string())),
+            description: None,
+            format: None,
+            enum_values: None,
+            minimum: None,
+            maximum: None,
+            pattern: None,
+            properties: Some(properties),
+            additional_properties: Some(!self.config.strict_additional_properties),
+            items: None,
+        }))
+    }
+
     /// Build a nested property tree from field statistics
+    /// Excluded keys will not appear in the property tree
     fn build_property_tree(
         &self,
         stats: &[FieldStats],
+        excluded_keys: &[String],
     ) -> (HashMap<String, PropertySchema>, Vec<String>) {
         let mut root_properties: HashMap<String, PropertySchema> = HashMap::new();
         let mut required_fields = Vec::new();
@@ -261,6 +576,11 @@ impl SchemaGenerator {
 
             let root_field_raw = parts[0];
             let (root_field, is_array) = self.parse_field_name(root_field_raw);
+
+            // Skip excluded keys (pattern-matched keys)
+            if excluded_keys.contains(&root_field) {
+                continue;
+            }
 
             if parts.len() == 1 && !is_array {
                 // Top-level scalar field
@@ -572,6 +892,34 @@ fn is_uuid_format(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Detect if a key name follows a known pattern
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum KeyPattern {
+    Uuid,
+    // Future patterns: Timestamp, NumericId, etc.
+}
+
+impl KeyPattern {
+    /// Get the JSON Schema regex pattern for this key pattern
+    fn to_regex(&self) -> String {
+        match self {
+            KeyPattern::Uuid => {
+                // UUID v4 pattern (lowercase)
+                "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$".to_string()
+            }
+        }
+    }
+
+    /// Detect pattern from a key name
+    fn detect(key: &str) -> Option<Self> {
+        if is_uuid_format(key) {
+            Some(KeyPattern::Uuid)
+        } else {
+            None
+        }
+    }
+}
+
 /// Quote a PostgreSQL identifier
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
@@ -698,7 +1046,7 @@ mod tests {
         age_stats.finalize(100);
         stats.push(age_stats);
 
-        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100);
+        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
 
         assert_eq!(schema.schema_type, "object");
         assert_eq!(schema.properties.len(), 2);
@@ -736,7 +1084,7 @@ mod tests {
         role_stats.finalize(100);
         stats.push(role_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         let role_prop = schema.properties.get("role").unwrap();
         assert!(role_prop.enum_values.is_some());
@@ -754,6 +1102,8 @@ mod tests {
             properties: HashMap::new(),
             required: vec![],
             additional_properties: true,
+            items: None,
+            pattern_properties: None,
         };
 
         let json_val = schema.to_json();
@@ -806,7 +1156,7 @@ mod tests {
         let config = SchemaConfig::default();
         let generator = SchemaGenerator::new(config);
 
-        let schema = generator.generate_json_schema(&[], None, 0);
+        let schema = generator.generate_json_schema(&[], None, 0, false);
 
         // Validate the schema is valid JSON Schema 2020-12
         assert!(
@@ -830,7 +1180,7 @@ mod tests {
         email_stats.finalize(100);
         stats.push(email_stats);
 
-        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100);
+        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Basic schema should be valid JSON Schema 2020-12");
@@ -872,7 +1222,7 @@ mod tests {
         bool_stats.finalize(100);
         stats.push(bool_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with multiple types should be valid");
@@ -904,7 +1254,7 @@ mod tests {
         role_stats.finalize(100);
         stats.push(role_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with enum should be valid");
@@ -929,7 +1279,7 @@ mod tests {
         score_stats.finalize(100);
         stats.push(score_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with number constraints should be valid");
@@ -963,7 +1313,7 @@ mod tests {
         uuid_stats.finalize(100);
         stats.push(uuid_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with format hints should be valid");
@@ -1002,7 +1352,7 @@ mod tests {
         optional_stats.finalize(100);
         stats.push(optional_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with required fields should be valid");
@@ -1029,7 +1379,7 @@ mod tests {
         email_stats.finalize(100);
         stats.push(email_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Strict mode schema should be valid");
@@ -1056,7 +1406,7 @@ mod tests {
         nullable_stats.finalize(100);
         stats.push(nullable_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with nullable fields should be valid");
@@ -1080,7 +1430,7 @@ mod tests {
         mixed_stats.finalize(100);
         stats.push(mixed_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with mixed types should be valid");
@@ -1153,7 +1503,8 @@ mod tests {
         let schema = generator.generate_json_schema(
             &stats,
             Some("User Schema".to_string()),
-            100
+            100,
+            false
         );
 
         // Validate the complex schema
@@ -1195,7 +1546,7 @@ mod tests {
         email_stats.finalize(100);
         stats.push(email_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with nested objects should be valid");
@@ -1231,7 +1582,7 @@ mod tests {
         theme_stats.finalize(100);
         stats.push(theme_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Deeply nested schema should be valid");
@@ -1280,7 +1631,7 @@ mod tests {
         active_stats.finalize(100);
         stats.push(active_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Mixed schema should be valid");
@@ -1320,7 +1671,7 @@ mod tests {
             stats.push(field_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Nested object with multiple fields should be valid");
@@ -1369,7 +1720,7 @@ mod tests {
         bio_stats.finalize(100);
         stats.push(bio_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Nested schema with required fields should be valid");
@@ -1405,7 +1756,7 @@ mod tests {
         uuid_stats.finalize(100);
         stats.push(uuid_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Nested schema with format hints should be valid");
@@ -1442,7 +1793,7 @@ mod tests {
         role_stats.finalize(100);
         stats.push(role_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Nested schema with enums should be valid");
@@ -1474,7 +1825,7 @@ mod tests {
         name_stats.finalize(100);
         stats.push(name_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Nested strict schema should be valid");
@@ -1518,7 +1869,7 @@ mod tests {
         meta_version_stats.finalize(100);
         stats.push(meta_version_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Multiple nested objects should be valid");
@@ -1552,7 +1903,7 @@ mod tests {
         items_stats.finalize(100);
         stats.push(items_stats);
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema should be valid with array paths");
@@ -1574,6 +1925,83 @@ mod tests {
         assert!(items_schema.properties.is_some());
         let items_properties = items_schema.properties.as_ref().unwrap();
         assert!(items_properties.contains_key("id"));
+    }
+
+    #[test]
+    fn test_schema_with_uuid_pattern_properties() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Simulate 1000 total samples where each UUID appears in only ~5% (50 samples)
+        // This makes them ghost keys (density <= 0.10)
+        let total_samples = 1000;
+        let uuid_sample_count = 50; // 5% density - ghost keys
+
+        // UUID keys with nested properties
+        let uuid_keys = vec![
+            "550e8400-e29b-41d4-a716-446655440000",
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ];
+
+        for uuid in &uuid_keys {
+            // Create stats for the UUID key itself (ghost key)
+            let mut uuid_stats = FieldStats::new(uuid.to_string(), 0);
+            for _ in 0..uuid_sample_count {
+                uuid_stats.record(&json!({"name": "Alice", "email": "alice@example.com"}));
+            }
+            uuid_stats.finalize(total_samples);
+            stats.push(uuid_stats);
+
+            // Each UUID has a name field
+            let path = format!("{}.name", uuid);
+            let mut name_stats = FieldStats::new(path, 0);
+            for _ in 0..uuid_sample_count {
+                name_stats.record(&json!("Alice"));
+            }
+            name_stats.finalize(total_samples);
+            stats.push(name_stats);
+
+            // Each UUID has an email field
+            let path = format!("{}.email", uuid);
+            let mut email_stats = FieldStats::new(path, 0);
+            for _ in 0..uuid_sample_count {
+                email_stats.record(&json!("alice@example.com"));
+            }
+            email_stats.finalize(total_samples);
+            stats.push(email_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        // Print the generated schema for inspection
+        println!("\n=== Generated Schema with UUID Pattern Properties ===");
+        println!("{}", schema.to_json_string());
+        println!("======================================================\n");
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with UUID pattern properties should be valid");
+
+        // Should have patternProperties
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+
+        // Should have UUID pattern
+        assert_eq!(pattern_props.len(), 1);
+        let uuid_pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+        assert!(pattern_props.contains_key(uuid_pattern));
+
+        // The UUID pattern should have an object schema with name and email properties
+        let uuid_schema = &pattern_props[uuid_pattern];
+        assert!(uuid_schema.properties.is_some());
+        let uuid_props = uuid_schema.properties.as_ref().unwrap();
+        assert!(uuid_props.contains_key("name"));
+        assert!(uuid_props.contains_key("email"));
+
+        // UUID keys should NOT be in regular properties (they're excluded)
+        assert!(schema.properties.is_empty(), "UUID keys should be excluded from properties when using patternProperties");
     }
 
     #[test]
@@ -1601,7 +2029,7 @@ mod tests {
             stats.push(field_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, 100);
+        let schema = generator.generate_json_schema(&stats, None, 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Schema with only array paths should be valid");

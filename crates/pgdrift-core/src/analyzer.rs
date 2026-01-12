@@ -7,6 +7,7 @@ pub struct JsonAnalyzer {
     stats: HashMap<String, FieldStats>,
     total_samples: u64,
     filter: PathFilter,
+    root_is_array: Option<bool>,
 }
 
 impl Default for JsonAnalyzer {
@@ -21,6 +22,7 @@ impl JsonAnalyzer {
             stats: HashMap::new(),
             total_samples: 0,
             filter: PathFilter::new(),
+            root_is_array: None,
         }
     }
 
@@ -30,12 +32,24 @@ impl JsonAnalyzer {
             stats: HashMap::new(),
             total_samples: 0,
             filter,
+            root_is_array: None,
         }
     }
 
     /// Analyze a sing json document
     pub fn analyze(&mut self, value: &Value) {
         self.total_samples += 1;
+
+        // Detect if root is an array
+        if self.root_is_array.is_none() {
+            self.root_is_array = Some(value.is_array());
+        }
+
+        // For root-level arrays, record the array itself
+        if value.is_array() {
+            self.record_field("[]", value, 0);
+        }
+
         self.walk("", value, 0);
     }
 
@@ -78,6 +92,11 @@ impl JsonAnalyzer {
             .entry(path.to_string())
             .or_insert_with(|| FieldStats::new(path.to_string(), depth))
             .record(value);
+    }
+
+    /// Check if the root JSON value is an array
+    pub fn is_root_array(&self) -> bool {
+        self.root_is_array.unwrap_or(false)
     }
 
     pub fn finalize(mut self) -> HashMap<String, FieldStats> {
