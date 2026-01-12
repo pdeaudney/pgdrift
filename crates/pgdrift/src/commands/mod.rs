@@ -1,7 +1,9 @@
 pub mod analyze;
 pub mod discover;
 pub mod index;
+pub mod migrate;
 pub mod scan_all;
+pub mod schema;
 
 use anyhow::{Context, Result};
 use pgdrift_core::filter::PathFilter;

@@ -117,6 +117,80 @@ enum Commands {
         #[arg(long = "ignore-config", value_name = "FILE")]
         ignore_config: Option<String>,
     },
+
+    /// Generate migration guide to extract JSONB fields to native columns
+    Migrate {
+        /// DB connection URL
+        #[arg(short, long, env = "DATABASE_URL")]
+        database_url: String,
+
+        /// Table name
+        table: String,
+
+        /// Column name
+        column: String,
+
+        /// Output format
+        #[arg(short = 'f', long, value_enum, default_value = "table")]
+        format: output::OutputFormat,
+
+        /// Number of samples to analyze
+        #[arg(short, long, default_value = "5000")]
+        sample_size: usize,
+
+        /// Minimum field density to consider for migration (0.0-1.0)
+        #[arg(long, default_value = "0.8")]
+        min_density: f64,
+
+        /// Minimum type consistency to consider safe (0.0-1.0)
+        #[arg(long, default_value = "0.95")]
+        min_type_consistency: f64,
+
+        /// JSON paths to ignore (can be specified multiple times)
+        #[arg(long = "ignore-path", value_name = "PATTERN")]
+        ignore_paths: Vec<String>,
+
+        /// Path to ignore config file (default: .pgdrift-ignore.toml)
+        #[arg(long = "ignore-config", value_name = "FILE")]
+        ignore_config: Option<String>,
+    },
+
+    /// Generate JSON Schema for a JSONB column
+    Schema {
+        /// DB connection URL
+        #[arg(short, long, env = "DATABASE_URL")]
+        database_url: String,
+
+        /// Table name
+        table: String,
+
+        /// Column name
+        column: String,
+
+        /// Schema output format: json-schema or pg-jsonschema
+        #[arg(short = 'f', long, default_value = "json-schema")]
+        format: String,
+
+        /// Number of samples to analyze
+        #[arg(short, long, default_value = "5000")]
+        sample_size: usize,
+
+        /// Minimum field density to be marked as required (0.0-1.0)
+        #[arg(long, default_value = "0.95")]
+        required_threshold: f64,
+
+        /// Strict mode: set additionalProperties to false
+        #[arg(long)]
+        strict: bool,
+
+        /// JSON paths to ignore (can be specified multiple times)
+        #[arg(long = "ignore-path", value_name = "PATTERN")]
+        ignore_paths: Vec<String>,
+
+        /// Path to ignore config file (default: .pgdrift-ignore.toml)
+        #[arg(long = "ignore-config", value_name = "FILE")]
+        ignore_config: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -168,6 +242,55 @@ async fn main() -> anyhow::Result<()> {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
             commands::scan_all::run(&database_url, sample_size, format, schema, table, filter)
                 .await?;
+        }
+        Commands::Migrate {
+            database_url,
+            table,
+            column,
+            sample_size,
+            format,
+            min_density,
+            min_type_consistency,
+            ignore_paths,
+            ignore_config,
+        } => {
+            let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            commands::migrate::run(
+                &database_url,
+                &table,
+                &column,
+                sample_size,
+                format,
+                min_density,
+                min_type_consistency,
+                filter,
+            )
+            .await?;
+        }
+        Commands::Schema {
+            database_url,
+            table,
+            column,
+            format,
+            sample_size,
+            required_threshold,
+            strict,
+            ignore_paths,
+            ignore_config,
+        } => {
+            let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            let schema_format = commands::schema::SchemaFormat::from_str(&format)?;
+            commands::schema::run(
+                &database_url,
+                &table,
+                &column,
+                sample_size,
+                schema_format,
+                required_threshold,
+                strict,
+                filter,
+            )
+            .await?;
         }
     }
     Ok(())

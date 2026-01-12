@@ -1,7 +1,7 @@
 use crate::types::JsonType;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldStats {
@@ -13,6 +13,20 @@ pub struct FieldStats {
     pub types: HashMap<JsonType, u64>,
     pub examples: Vec<Value>,
     pub depth: usize,
+
+    // Number statistics for type inference and schema generation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_decimals: Option<bool>,
+
+    // String statistics for enum detection and schema generation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_values: Option<HashSet<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_string_length: Option<usize>,
 }
 
 impl FieldStats {
@@ -26,6 +40,11 @@ impl FieldStats {
             types: HashMap::new(),
             examples: Vec::new(),
             depth,
+            min_number: None,
+            max_number: None,
+            has_decimals: None,
+            distinct_values: None,
+            max_string_length: None,
         }
     }
 
@@ -40,7 +59,37 @@ impl FieldStats {
             self.null_count += 1;
         }
 
-        // store examples  - max 10
+        // Track number statistics
+        if let Value::Number(num) = value {
+            if let Some(n) = num.as_f64() {
+                // Track min/max
+                self.min_number = Some(self.min_number.map_or(n, |min| min.min(n)));
+                self.max_number = Some(self.max_number.map_or(n, |max| max.max(n)));
+
+                // Track if we've seen any decimals
+                if !num.is_i64() && !num.is_u64() {
+                    self.has_decimals = Some(true);
+                } else if self.has_decimals.is_none() {
+                    self.has_decimals = Some(false);
+                }
+            }
+        }
+
+        // Track distinct string values (up to 100 for enum detection)
+        if let Value::String(s) = value {
+            // Track max string length
+            self.max_string_length = Some(
+                self.max_string_length.map_or(s.len(), |max| max.max(s.len()))
+            );
+
+            // Track distinct values (limit to 100 to avoid memory issues)
+            let distinct_values = self.distinct_values.get_or_insert_with(HashSet::new);
+            if distinct_values.len() < 100 {
+                distinct_values.insert(s.clone());
+            }
+        }
+
+        // Store examples - max 10
         if self.examples.len() < 10 {
             self.examples.push(value.clone());
         }
