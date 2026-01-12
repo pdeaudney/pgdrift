@@ -712,7 +712,7 @@ pgdrift analyze users metadata --ignore-config ./custom-ignore.toml
 
 #### Pattern Matching
 
-pgdrift supports two types of patterns:
+pgdrift supports three types of patterns:
 
 **Exact match**: Matches only the specific path
 
@@ -723,7 +723,7 @@ ignore_paths = ["user.email"]
 - Filters: `user.email`
 - Keeps: `user.email.domain`, `user.name`
 
-**Prefix match with wildcard**: Matches a path and all its children
+**Suffix wildcard**: Matches a path and all its children
 
 ```toml
 ignore_paths = ["user.internal.*"]
@@ -732,10 +732,22 @@ ignore_paths = ["user.internal.*"]
 - Filters: `user.internal`, `user.internal.id`, `user.internal.token`, `user.internal.metadata.secret`
 - Keeps: `user.email`, `user.name`, `user.external`
 
+**Prefix wildcard**: Matches any path ending with the specified suffix
+
+```toml
+ignore_paths = ["*.date_created", "*.timestamp"]
+```
+
+- Filters: `user.date_created`, `550e8400-e29b-41d4-a716-446655440000.date_created`, `record.timestamp`, `event.payload.timestamp`
+- Keeps: `user.date_updated`, `date_created.something`, `timestamp_tz`
+
+This is particularly useful for ignoring fields across UUID-keyed objects or standardized timestamp fields.
+
 **Important notes:**
 
 - Patterns are case-sensitive
-- Array paths like `items[].name` use different notation and won't match `items.*`
+- Suffix wildcards match array notation (e.g., `internal.*` does NOT match `items[].name`)
+- Prefix wildcards DO match array notation (e.g., `*.name` matches `items[].name`)
 - CLI flags and TOML patterns are merged (not replaced)
 
 #### Common Use Cases
@@ -769,6 +781,19 @@ ignore_paths = [
     "session_data",
 ]
 ```
+
+**Ignoring timestamp fields across all records:**
+
+```toml
+ignore_paths = [
+    "*.created_at",
+    "*.updated_at",
+    "*.deleted_at",
+    "*.last_modified",
+]
+```
+
+This is useful when you have UUID-keyed JSONB objects where each UUID has its own timestamp fields that you want to exclude from drift analysis.
 
 **Combining CLI and file:**
 

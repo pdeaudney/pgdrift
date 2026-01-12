@@ -890,3 +890,155 @@ async fn test_analyze_inconsistent_nesting_levels() {
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }
+
+/// Test analyze with prefix wildcard path filtering (*.suffix patterns)
+#[tokio::test]
+async fn test_analyze_with_prefix_wildcard_filter() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE uuid_records (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert records with UUID-keyed objects that have timestamp fields
+    for i in 0..100 {
+        let uuid1 = format!("550e8400-e29b-41d4-a716-44665544{:04}", i);
+        let uuid2 = format!("6ba7b810-9dad-11d1-80b4-00c04fd4{:04}", i);
+
+        let data = serde_json::json!({
+            uuid1: {
+                "name": format!("Record {}", i),
+                "value": i * 10,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-02T00:00:00Z"
+            },
+            uuid2: {
+                "status": "active",
+                "count": i,
+                "created_at": "2024-01-01T00:00:00Z",
+                "deleted_at": "2024-01-03T00:00:00Z"
+            },
+            "metadata": {
+                "created_at": "2024-01-01T00:00:00Z",
+                "important_field": "should_be_analyzed"
+            }
+        });
+
+        sqlx::query("INSERT INTO uuid_records (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert uuid record");
+    }
+
+    // Create filter to ignore all timestamp fields using prefix wildcards
+    let mut filter = PathFilter::new();
+    filter.add_patterns(vec![
+        "*.created_at".to_string(),
+        "*.updated_at".to_string(),
+        "*.deleted_at".to_string(),
+    ]);
+
+    // Analyze with prefix wildcard filter
+    let result = analyze::run(
+        test_db.database_url(),
+        "uuid_records",
+        "data",
+        100,
+        OutputFormat::Json,
+        filter,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should handle prefix wildcard filtering: {:?}",
+        result.err()
+    );
+
+    // The analysis should NOT include any *_at fields (all filtered)
+    // but SHOULD include name, value, status, count, important_field
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test analyze with combined suffix and prefix wildcard filtering
+#[tokio::test]
+async fn test_analyze_with_combined_wildcard_filters() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE combined_filter_test (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert records with various patterns
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i),
+                "created_at": "2024-01-01T00:00:00Z",
+                "internal": {
+                    "token": "secret",
+                    "api_key": "secret"
+                }
+            },
+            "record_123": {
+                "value": i,
+                "created_at": "2024-01-01T00:00:00Z"
+            },
+            "debug": {
+                "log": "debugging info",
+                "trace": "stack trace"
+            }
+        });
+
+        sqlx::query("INSERT INTO combined_filter_test (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert combined filter test data");
+    }
+
+    // Create filter with both suffix wildcards (prefix.*) and prefix wildcards (*.suffix)
+    let mut filter = PathFilter::new();
+    filter.add_patterns(vec![
+        "user.internal.*".to_string(),  // Suffix wildcard - filters user.internal and children
+        "debug.*".to_string(),           // Suffix wildcard - filters debug and children
+        "*.created_at".to_string(),      // Prefix wildcard - filters all created_at fields
+    ]);
+
+    // Analyze with combined filters
+    let result = analyze::run(
+        test_db.database_url(),
+        "combined_filter_test",
+        "data",
+        100,
+        OutputFormat::Json,
+        filter,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should handle combined wildcard filtering: {:?}",
+        result.err()
+    );
+
+    // Analysis should include: user.name, user.email, record_123.value
+    // Analysis should NOT include: user.internal.*, debug.*, *.created_at
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
