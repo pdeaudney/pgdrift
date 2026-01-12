@@ -18,8 +18,10 @@ toml = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 pgdrift-db = { workspace = true }
 sqlx = { workspace = true }
 jsonschema = "0.38"
+tempfile = { workspace = true }

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use pgdrift_core::analyzer::JsonAnalyzer;
 use pgdrift_core::filter::PathFilter;
+use pgdrift_core::pattern::PatternConfig;
 use pgdrift_core::schema::{JsonSchema, SchemaConfig, SchemaGenerator};
 use pgdrift_db::{ConnectionPool, Sampler};
 
@@ -31,6 +32,7 @@ pub async fn run(
     required_threshold: f64,
     strict: bool,
     filter: PathFilter,
+    pattern_config: PatternConfig,
 ) -> Result<()> {
     let (schema_name, table_name) = parse_table_name(table);
 
@@ -40,6 +42,14 @@ pub async fn run(
             "Applying {} ignore pattern(s): {}",
             filter.patterns().len(),
             filter.patterns().join(", ")
+        );
+    }
+
+    // Show pattern info if custom patterns are configured
+    if !pattern_config.patterns().is_empty() {
+        println!(
+            "Using {} custom pattern(s) for patternProperties",
+            pattern_config.patterns().len()
         );
     }
 
@@ -85,7 +95,7 @@ pub async fn run(
         ..Default::default()
     };
 
-    let generator = SchemaGenerator::new(config);
+    let generator = SchemaGenerator::with_patterns(config, pattern_config);
     let json_schema = generator.generate_json_schema(
         &field_stats,
         Some(format!("{}.{}.{} schema", schema_name, table_name, column)),

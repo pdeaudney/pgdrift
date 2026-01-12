@@ -44,3 +44,9 @@ anyhow = "1.0"
 
 # Time and dates
 chrono = "0.4"
+
+# Regular expressions
+regex = "1.10"
+
+# Testing utilities
+tempfile = "3.15"

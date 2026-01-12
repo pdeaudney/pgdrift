@@ -44,3 +44,27 @@ pub fn load_path_filter(
 
     Ok(filter)
 }
+
+pub fn load_pattern_config(
+    cli_patterns: Vec<String>,
+    config_path: Option<String>,
+) -> Result<pgdrift_core::pattern::PatternConfig> {
+    let mut pattern_config = pgdrift_core::pattern::PatternConfig::new();
+
+    // Try to load from TOML file
+    if let Some(ref toml_path) = config_path {
+        if Path::new(toml_path).exists() {
+            pattern_config = pgdrift_core::pattern::PatternConfig::from_file(toml_path)
+                .with_context(|| format!("Failed to parse pattern config: {}", toml_path))?;
+        } else {
+            anyhow::bail!("Pattern config file not found: {}", toml_path);
+        }
+    }
+
+    // Add CLI patterns (merge with TOML)
+    if !cli_patterns.is_empty() {
+        pattern_config.add_patterns(cli_patterns);
+    }
+
+    Ok(pattern_config)
+}

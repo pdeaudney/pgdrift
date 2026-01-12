@@ -190,6 +190,14 @@ enum Commands {
         /// Path to ignore config file (default: .pgdrift-ignore.toml)
         #[arg(long = "ignore-config", value_name = "FILE")]
         ignore_config: Option<String>,
+
+        /// Custom regex patterns for patternProperties (can be specified multiple times)
+        #[arg(long = "pattern-regex", value_name = "REGEX")]
+        pattern_regexes: Vec<String>,
+
+        /// Path to pattern config file (TOML format)
+        #[arg(long = "pattern-config", value_name = "FILE")]
+        pattern_config: Option<String>,
     },
 }
 
@@ -277,8 +285,11 @@ async fn main() -> anyhow::Result<()> {
             strict,
             ignore_paths,
             ignore_config,
+            pattern_regexes,
+            pattern_config,
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
+            let pattern_cfg = commands::load_pattern_config(pattern_regexes, pattern_config)?;
             let schema_format = commands::schema::SchemaFormat::from_str(&format)?;
             commands::schema::run(
                 &database_url,
@@ -289,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
                 required_threshold,
                 strict,
                 filter,
+                pattern_cfg,
             )
             .await?;
         }

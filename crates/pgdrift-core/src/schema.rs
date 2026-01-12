@@ -1,3 +1,4 @@
+use crate::pattern::PatternConfig;
 use crate::stats::FieldStats;
 use crate::types::JsonType;
 use serde::Serialize;
@@ -227,11 +228,23 @@ impl JsonSchema {
 /// Schema generator
 pub struct SchemaGenerator {
     config: SchemaConfig,
+    pattern_config: PatternConfig,
 }
 
 impl SchemaGenerator {
     pub fn new(config: SchemaConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            pattern_config: PatternConfig::new(),
+        }
+    }
+
+    /// Create a new schema generator with custom pattern configuration
+    pub fn with_patterns(config: SchemaConfig, pattern_config: PatternConfig) -> Self {
+        Self {
+            config,
+            pattern_config,
+        }
     }
 
     /// Generate JSON Schema from field statistics
@@ -411,7 +424,7 @@ impl SchemaGenerator {
                 .unwrap_or(false);
 
             if is_ghost_key {
-                if let Some(pattern) = KeyPattern::detect(&key) {
+                if let Some(pattern) = KeyPattern::detect(&key, &self.pattern_config) {
                     pattern_groups
                         .entry(pattern)
                         .or_default()
@@ -500,7 +513,7 @@ impl SchemaGenerator {
 
                 // Check if this is a ghost key and matches a pattern
                 if stat.density <= self.config.ghost_key_threshold {
-                    if let Some(pattern) = KeyPattern::detect(child_key) {
+                    if let Some(pattern) = KeyPattern::detect(child_key, &self.pattern_config) {
                         pattern_groups
                             .entry(pattern)
                             .or_default()
@@ -1014,7 +1027,7 @@ fn is_uuid_format(s: &str) -> bool {
 enum KeyPattern {
     Uuid,
     HexString16, // 16-character hex strings (device IDs, session tokens, etc.)
-    // Future patterns: Timestamp, NumericId, etc.
+    Custom(String), // Custom regex pattern
 }
 
 impl KeyPattern {
@@ -1029,11 +1042,12 @@ impl KeyPattern {
                 // 16-character hex string (device IDs, session tokens)
                 "^[0-9a-fA-F]{16}$".to_string()
             }
+            KeyPattern::Custom(regex) => regex.clone(),
         }
     }
 
-    /// Detect pattern from a key name
-    fn detect(key: &str) -> Option<Self> {
+    /// Detect pattern from a key name (built-in patterns only)
+    fn detect_builtin(key: &str) -> Option<Self> {
         if is_uuid_format(key) {
             Some(KeyPattern::Uuid)
         } else if is_hex_string_16(key) {
@@ -1041,6 +1055,17 @@ impl KeyPattern {
         } else {
             None
         }
+    }
+
+    /// Detect pattern from a key name, checking custom patterns first, then built-in
+    fn detect(key: &str, pattern_config: &PatternConfig) -> Option<Self> {
+        // Check custom patterns first
+        if let Some(custom_pattern) = pattern_config.matches(key) {
+            return Some(KeyPattern::Custom(custom_pattern.regex.clone()));
+        }
+
+        // Fall back to built-in patterns
+        Self::detect_builtin(key)
     }
 }
 
@@ -2321,4 +2346,243 @@ mod tests {
         assert!(items_properties.contains_key("type"));
         assert!(items_properties.contains_key("expires_at"));
     }
+
+    // ===== Custom Pattern Tests =====
+
+    #[test]
+    fn test_schema_with_custom_numeric_id_pattern() {
+        let config = SchemaConfig::default();
+        let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
+            "^[0-9]{6}$".to_string(), // 6-digit numeric IDs
+        ]);
+        let generator = SchemaGenerator::with_patterns(config, pattern_config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // Simulate 6-digit numeric ID keys (ghost keys at 0.01% density each)
+        let numeric_ids = vec!["123456", "789012", "345678"];
+
+        for id in &numeric_ids {
+            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            id_stats.record(&json!({"value": "data"}));
+            id_stats.finalize(total_samples);
+            stats.push(id_stats);
+
+            // Each ID has a value field
+            let path = format!("{}.value", id);
+            let mut value_stats = FieldStats::new(path, 0);
+            value_stats.record(&json!("data"));
+            value_stats.finalize(total_samples);
+            stats.push(value_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Custom Numeric ID Pattern Schema ===");
+        println!("{}", schema.to_json_string());
+        println!("=========================================\n");
+
+        // Should have patternProperties for numeric IDs
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+
+        // Should have the custom pattern
+        assert!(pattern_props.contains_key("^[0-9]{6}$"));
+
+        // Individual numeric IDs should NOT be in regular properties
+        assert!(!schema.properties.contains_key("123456"));
+        assert!(!schema.properties.contains_key("789012"));
+        assert!(!schema.properties.contains_key("345678"));
+    }
+
+    #[test]
+    fn test_schema_with_custom_pattern_priority() {
+        // Custom patterns should take priority over built-in patterns
+        let config = SchemaConfig::default();
+        let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
+            "^[0-9a-fA-F]{16}$".to_string(), // Same as built-in HexString16
+        ]);
+        let generator = SchemaGenerator::with_patterns(config, pattern_config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        let hex_ids = vec!["abc123def4567890", "fedcba9876543210"];
+
+        for id in &hex_ids {
+            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            id_stats.record(&json!({"data": "test"}));
+            id_stats.finalize(total_samples);
+            stats.push(id_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        // Should still use patternProperties (custom pattern matches)
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+        assert!(pattern_props.contains_key("^[0-9a-fA-F]{16}$"));
+    }
+
+    #[test]
+    fn test_schema_with_nested_custom_patterns() {
+        let config = SchemaConfig::default();
+        let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
+            "^session_[0-9a-f]{32}$".to_string(), // Session tokens
+        ]);
+        let generator = SchemaGenerator::with_patterns(config, pattern_config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // Parent object
+        let mut sessions_stats = FieldStats::new("sessions".to_string(), 0);
+        for _ in 0..100 {
+            sessions_stats.record(&json!({}));
+        }
+        sessions_stats.finalize(total_samples);
+        stats.push(sessions_stats);
+
+        // Session token keys (ghost keys)
+        let session_tokens = vec![
+            "session_abcdef0123456789abcdef0123456789",
+            "session_fedcba9876543210fedcba9876543210",
+            "session_0123456789abcdef0123456789abcdef",
+        ];
+
+        for token in &session_tokens {
+            let path = format!("sessions.{}", token);
+            let mut token_stats = FieldStats::new(path.clone(), 0);
+            token_stats.record(&json!({"expires": "2025-01-12"}));
+            token_stats.finalize(total_samples);
+            stats.push(token_stats);
+
+            // Each session has an expires field
+            let expires_path = format!("{}.expires", path);
+            let mut expires_stats = FieldStats::new(expires_path, 0);
+            expires_stats.record(&json!("2025-01-12"));
+            expires_stats.finalize(total_samples);
+            stats.push(expires_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Nested Custom Pattern Schema ===");
+        println!("{}", schema.to_json_string());
+        println!("====================================\n");
+
+        // sessions should be in properties
+        assert!(schema.properties.contains_key("sessions"));
+        let sessions_prop = schema.properties.get("sessions").unwrap();
+
+        // sessions should have patternProperties
+        assert!(sessions_prop.pattern_properties.is_some());
+        let pattern_props = sessions_prop.pattern_properties.as_ref().unwrap();
+        assert!(pattern_props.contains_key("^session_[0-9a-f]{32}$"));
+
+        // Individual session tokens should NOT be in properties
+        assert!(sessions_prop.properties.is_none() || sessions_prop.properties.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_schema_with_multiple_custom_patterns() {
+        let config = SchemaConfig::default();
+        let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
+            "^user_[0-9]+$".to_string(),    // User IDs like user_123
+            "^api_key_[A-Za-z0-9]{40}$".to_string(), // API keys
+        ]);
+        let generator = SchemaGenerator::with_patterns(config, pattern_config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // User IDs (ghost keys)
+        let user_ids = vec!["user_123", "user_456"];
+        for user_id in &user_ids {
+            let mut id_stats = FieldStats::new(user_id.to_string(), 0);
+            id_stats.record(&json!({"name": "Alice"}));
+            id_stats.finalize(total_samples);
+            stats.push(id_stats);
+        }
+
+        // API keys (ghost keys)
+        let api_keys = vec![
+            "api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD",
+            "api_key_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
+        ];
+        for api_key in &api_keys {
+            let mut key_stats = FieldStats::new(api_key.to_string(), 0);
+            key_stats.record(&json!({"permissions": ["read", "write"]}));
+            key_stats.finalize(total_samples);
+            stats.push(key_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Multiple Custom Patterns Schema ===");
+        println!("{}", schema.to_json_string());
+        println!("=======================================\n");
+
+        // Should have patternProperties
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+
+        // Should have both patterns
+        assert!(pattern_props.contains_key("^user_[0-9]+$"));
+        assert!(pattern_props.contains_key("^api_key_[A-Za-z0-9]{40}$"));
+
+        // No individual keys in properties
+        assert!(!schema.properties.contains_key("user_123"));
+        assert!(!schema.properties.contains_key("api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD"));
+    }
+
+    #[test]
+    fn test_schema_custom_pattern_with_builtin_fallback() {
+        // If custom pattern doesn't match, should fall back to built-in patterns
+        let config = SchemaConfig::default();
+        let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
+            "^custom_[0-9]{4}$".to_string(), // Custom 4-digit pattern
+        ]);
+        let generator = SchemaGenerator::with_patterns(config, pattern_config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // Custom pattern keys
+        let custom_ids = vec!["custom_1234", "custom_5678"];
+        for id in &custom_ids {
+            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            id_stats.record(&json!({"value": "custom"}));
+            id_stats.finalize(total_samples);
+            stats.push(id_stats);
+        }
+
+        // UUID keys (should use built-in UUID pattern)
+        let uuid_keys = vec![
+            "550e8400-e29b-41d4-a716-446655440000",
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        ];
+        for uuid in &uuid_keys {
+            let mut uuid_stats = FieldStats::new(uuid.to_string(), 0);
+            uuid_stats.record(&json!({"value": "uuid"}));
+            uuid_stats.finalize(total_samples);
+            stats.push(uuid_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Custom + Built-in Patterns Schema ===");
+        println!("{}", schema.to_json_string());
+        println!("=========================================\n");
+
+        // Should have patternProperties
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+
+        // Should have both custom and built-in UUID pattern
+        assert!(pattern_props.contains_key("^custom_[0-9]{4}$"));
+        assert!(pattern_props.contains_key("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
+    }
 }
+

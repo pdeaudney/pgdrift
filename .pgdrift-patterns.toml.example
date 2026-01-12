@@ -1,0 +1,45 @@
+# pgdrift Pattern Configuration
+#
+# This file defines custom regex patterns for JSON Schema patternProperties.
+# When ghost keys (keys with density ≤ 10%) match these patterns, they will
+# be consolidated into patternProperties instead of being listed individually.
+#
+# Example usage:
+#   pgdrift schema users metadata --pattern-config .pgdrift-patterns.toml
+#
+# Or specify patterns directly:
+#   pgdrift schema users metadata --pattern-regex '^[0-9]{6}$'
+
+# Example: 6-digit numeric IDs
+[[patterns]]
+regex = "^[0-9]{6}$"
+description = "6-digit numeric identifiers"
+
+# Example: Session tokens
+[[patterns]]
+regex = "^session_[0-9a-f]{32}$"
+description = "Session tokens with 32-character hex suffix"
+
+# Example: API keys
+[[patterns]]
+regex = "^api_key_[A-Za-z0-9]{40}$"
+description = "API keys with 40-character alphanumeric suffix"
+
+# Example: User IDs with prefix
+[[patterns]]
+regex = "^user_[0-9]+$"
+description = "User IDs like user_123, user_456"
+
+# Example: ISO 8601 timestamps as keys
+[[patterns]]
+regex = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+description = "ISO 8601 timestamp keys"
+
+# Example: Custom order IDs
+[[patterns]]
+regex = "^ORD-[A-Z0-9]{8}$"
+description = "Order IDs like ORD-ABC12345"
+
+# Note: The description field is optional and only used for documentation.
+# Multiple patterns can be defined and they will be checked in order.
+# Custom patterns are checked before built-in patterns (UUID, 16-char hex).
