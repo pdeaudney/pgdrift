@@ -97,6 +97,10 @@ pub struct PropertySchema {
 
     #[serde(rename = "additionalProperties", skip_serializing_if = "Option::is_none")]
     pub additional_properties: Option<bool>,
+
+    // For arrays
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<PropertySchema>>,
 }
 
 impl PropertySchema {
@@ -164,6 +168,7 @@ impl PropertySchema {
             pattern: None,
             properties: None,
             additional_properties: None,
+            items: None,
         }
     }
 }
@@ -221,14 +226,8 @@ impl SchemaGenerator {
         schema_name: Option<String>,
         total_samples: u64,
     ) -> JsonSchema {
-        // Filter out array paths for now (e.g., "items[].name")
-        let non_array_stats: Vec<_> = stats
-            .iter()
-            .filter(|stat| !stat.path.contains('['))
-            .collect();
-
-        // Build nested property tree
-        let (root_properties, required_fields) = self.build_property_tree(&non_array_stats);
+        // Build nested property tree (now handles both regular and array paths)
+        let (root_properties, required_fields) = self.build_property_tree(stats);
 
         JsonSchema {
             schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
@@ -247,7 +246,7 @@ impl SchemaGenerator {
     /// Build a nested property tree from field statistics
     fn build_property_tree(
         &self,
-        stats: &[&FieldStats],
+        stats: &[FieldStats],
     ) -> (HashMap<String, PropertySchema>, Vec<String>) {
         let mut root_properties: HashMap<String, PropertySchema> = HashMap::new();
         let mut required_fields = Vec::new();
@@ -260,39 +259,96 @@ impl SchemaGenerator {
                 continue;
             }
 
-            let root_field = parts[0];
+            let root_field_raw = parts[0];
+            let (root_field, is_array) = self.parse_field_name(root_field_raw);
 
-            if parts.len() == 1 {
-                // Top-level field
+            if parts.len() == 1 && !is_array {
+                // Top-level scalar field
                 let property_schema = PropertySchema::from_field_stats(stat, &self.config);
                 root_properties.insert(root_field.to_string(), property_schema);
 
                 if stat.density >= self.config.required_threshold {
                     required_fields.push(root_field.to_string());
                 }
-            } else {
-                // Nested field - need to build nested structure
-                // Get or create the root property
-                let root_prop = root_properties
+            } else if parts.len() == 1 && is_array {
+                // Top-level array field (e.g., "items[]")
+                // Create or get array property
+                root_properties
                     .entry(root_field.to_string())
                     .or_insert_with(|| PropertySchema {
-                        property_type: Some(PropertyType::Single("object".to_string())),
-                        description: None,
+                        property_type: Some(PropertyType::Single("array".to_string())),
+                        description: Some(format!(
+                            "Occurs in {:.1}% of samples",
+                            stat.density * 100.0
+                        )),
                         format: None,
                         enum_values: None,
                         minimum: None,
                         maximum: None,
                         pattern: None,
-                        properties: Some(HashMap::new()),
-                        additional_properties: Some(!self.config.strict_additional_properties),
+                        properties: None,
+                        additional_properties: None,
+                        items: None,
                     });
+            } else {
+                // Nested field - build nested structure
+                if is_array {
+                    // Root field is an array (e.g., "items[].name")
+                    let root_prop = root_properties
+                        .entry(root_field.to_string())
+                        .or_insert_with(|| {
+                            // Create array with items object
+                            let items_schema = PropertySchema {
+                                property_type: Some(PropertyType::Single("object".to_string())),
+                                description: None,
+                                format: None,
+                                enum_values: None,
+                                minimum: None,
+                                maximum: None,
+                                pattern: None,
+                                properties: Some(HashMap::new()),
+                                additional_properties: Some(!self.config.strict_additional_properties),
+                                items: None,
+                            };
 
-                // Build nested path
-                self.insert_nested_property(
-                    root_prop,
-                    &parts[1..],
-                    stat,
-                );
+                            PropertySchema {
+                                property_type: Some(PropertyType::Single("array".to_string())),
+                                description: None,
+                                format: None,
+                                enum_values: None,
+                                minimum: None,
+                                maximum: None,
+                                pattern: None,
+                                properties: None,
+                                additional_properties: None,
+                                items: Some(Box::new(items_schema)),
+                            }
+                        });
+
+                    // Insert into the items object
+                    if let Some(ref mut items_box) = root_prop.items {
+                        self.insert_nested_property(items_box, &parts[1..], stat);
+                    }
+                } else {
+                    // Root field is an object
+                    let root_prop = root_properties
+                        .entry(root_field.to_string())
+                        .or_insert_with(|| PropertySchema {
+                            property_type: Some(PropertyType::Single("object".to_string())),
+                            description: None,
+                            format: None,
+                            enum_values: None,
+                            minimum: None,
+                            maximum: None,
+                            pattern: None,
+                            properties: Some(HashMap::new()),
+                            additional_properties: Some(!self.config.strict_additional_properties),
+                            items: None,
+                        });
+
+                    // Build nested path
+                    self.insert_nested_property(root_prop, &parts[1..], stat);
+                }
             }
         }
 
@@ -301,6 +357,16 @@ impl SchemaGenerator {
         required_fields.dedup();
 
         (root_properties, required_fields)
+    }
+
+    /// Parse a field name and detect if it's an array (ends with [])
+    /// Returns (field_name, is_array)
+    fn parse_field_name<'a>(&self, field: &'a str) -> (String, bool) {
+        if field.ends_with("[]") {
+            (field[..field.len() - 2].to_string(), true)
+        } else {
+            (field.to_string(), false)
+        }
     }
 
     /// Recursively insert a nested property into a property schema
@@ -314,33 +380,86 @@ impl SchemaGenerator {
             return;
         }
 
-        let field_name = path_parts[0];
+        let field_name_raw = path_parts[0];
+        let (field_name, is_array) = self.parse_field_name(field_name_raw);
 
         // Ensure parent has properties map
         let properties = parent.properties.get_or_insert_with(HashMap::new);
 
-        if path_parts.len() == 1 {
+        if path_parts.len() == 1 && !is_array {
             // Leaf node - insert the actual field
             let property_schema = PropertySchema::from_field_stats(stat, &self.config);
-            properties.insert(field_name.to_string(), property_schema);
-        } else {
-            // Intermediate node - create/get nested object
-            let nested_prop = properties
-                .entry(field_name.to_string())
+            properties.insert(field_name, property_schema);
+        } else if path_parts.len() == 1 && is_array {
+            // Leaf array field
+            properties
+                .entry(field_name.clone())
                 .or_insert_with(|| PropertySchema {
-                    property_type: Some(PropertyType::Single("object".to_string())),
+                    property_type: Some(PropertyType::Single("array".to_string())),
                     description: None,
                     format: None,
                     enum_values: None,
                     minimum: None,
                     maximum: None,
                     pattern: None,
-                    properties: Some(HashMap::new()),
-                    additional_properties: Some(!self.config.strict_additional_properties),
+                    properties: None,
+                    additional_properties: None,
+                    items: None,
                 });
+        } else {
+            // Intermediate node
+            if is_array {
+                // Intermediate array node (e.g., path "user.items[].name")
+                let nested_prop = properties
+                    .entry(field_name.clone())
+                    .or_insert_with(|| PropertySchema {
+                        property_type: Some(PropertyType::Single("array".to_string())),
+                        description: None,
+                        format: None,
+                        enum_values: None,
+                        minimum: None,
+                        maximum: None,
+                        pattern: None,
+                        properties: None,
+                        additional_properties: None,
+                        items: Some(Box::new(PropertySchema {
+                            property_type: Some(PropertyType::Single("object".to_string())),
+                            description: None,
+                            format: None,
+                            enum_values: None,
+                            minimum: None,
+                            maximum: None,
+                            pattern: None,
+                            properties: Some(HashMap::new()),
+                            additional_properties: Some(!self.config.strict_additional_properties),
+                            items: None,
+                        })),
+                    });
 
-            // Recurse
-            self.insert_nested_property(nested_prop, &path_parts[1..], stat);
+                // Recurse into the items
+                if let Some(ref mut items_box) = nested_prop.items {
+                    self.insert_nested_property(items_box, &path_parts[1..], stat);
+                }
+            } else {
+                // Intermediate object node
+                let nested_prop = properties
+                    .entry(field_name.clone())
+                    .or_insert_with(|| PropertySchema {
+                        property_type: Some(PropertyType::Single("object".to_string())),
+                        description: None,
+                        format: None,
+                        enum_values: None,
+                        minimum: None,
+                        maximum: None,
+                        pattern: None,
+                        properties: Some(HashMap::new()),
+                        additional_properties: Some(!self.config.strict_additional_properties),
+                        items: None,
+                    });
+
+                // Recurse
+                self.insert_nested_property(nested_prop, &path_parts[1..], stat);
+            }
         }
     }
 
@@ -1411,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_filters_array_paths() {
+    fn test_schema_with_array_paths() {
         let config = SchemaConfig::default();
         let generator = SchemaGenerator::new(config);
 
@@ -1425,7 +1544,7 @@ mod tests {
         name_stats.finalize(100);
         stats.push(name_stats);
 
-        // Array path (should be filtered out)
+        // Array path (should now be included)
         let mut items_stats = FieldStats::new("items[].id".to_string(), 0);
         for _ in 0..100 {
             items_stats.record(&json!(123));
@@ -1436,10 +1555,77 @@ mod tests {
         let schema = generator.generate_json_schema(&stats, None, 100);
 
         // Validate the schema
-        validate_json_schema(&schema).expect("Schema should be valid with array paths filtered");
+        validate_json_schema(&schema).expect("Schema should be valid with array paths");
 
-        // Should include user but not items
+        // Should include both user and items
         assert!(schema.properties.contains_key("user"));
-        assert!(!schema.properties.contains_key("items"));
+        assert!(schema.properties.contains_key("items"));
+
+        // items should be an array type
+        let items_prop = schema.properties.get("items").unwrap();
+        match &items_prop.property_type {
+            Some(PropertyType::Single(t)) => assert_eq!(t, "array"),
+            _ => panic!("Expected items to be array type"),
+        }
+
+        // items should have an items property with nested id field
+        assert!(items_prop.items.is_some());
+        let items_schema = items_prop.items.as_ref().unwrap();
+        assert!(items_schema.properties.is_some());
+        let items_properties = items_schema.properties.as_ref().unwrap();
+        assert!(items_properties.contains_key("id"));
+    }
+
+    #[test]
+    fn test_schema_with_only_array_paths() {
+        // This test reproduces the user's issue where ALL paths are arrays
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Only array paths (like tokens[].value, tokens[].type, etc.)
+        let fields = vec![
+            ("tokens[].id", json!(123)),
+            ("tokens[].value", json!("abc123")),
+            ("tokens[].type", json!("access")),
+            ("tokens[].expires_at", json!("2025-01-12T00:00:00Z")),
+        ];
+
+        for (path, value) in fields {
+            let mut field_stats = FieldStats::new(path.to_string(), 0);
+            for _ in 0..100 {
+                field_stats.record(&value);
+            }
+            field_stats.finalize(100);
+            stats.push(field_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with only array paths should be valid");
+
+        // Should NOT be empty - should have tokens property
+        assert!(!schema.properties.is_empty(), "Schema should not have empty properties");
+        assert!(schema.properties.contains_key("tokens"));
+
+        // tokens should be an array
+        let tokens_prop = schema.properties.get("tokens").unwrap();
+        match &tokens_prop.property_type {
+            Some(PropertyType::Single(t)) => assert_eq!(t, "array"),
+            _ => panic!("Expected tokens to be array type"),
+        }
+
+        // tokens.items should contain object with all the fields
+        assert!(tokens_prop.items.is_some());
+        let items_schema = tokens_prop.items.as_ref().unwrap();
+        assert!(items_schema.properties.is_some());
+        let items_properties = items_schema.properties.as_ref().unwrap();
+
+        assert!(items_properties.contains_key("id"));
+        assert!(items_properties.contains_key("value"));
+        assert!(items_properties.contains_key("type"));
+        assert!(items_properties.contains_key("expires_at"));
     }
 }
