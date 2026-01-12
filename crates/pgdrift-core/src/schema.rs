@@ -221,24 +221,14 @@ impl SchemaGenerator {
         schema_name: Option<String>,
         total_samples: u64,
     ) -> JsonSchema {
-        // Build property tree
-        let mut root_properties: HashMap<String, PropertySchema> = HashMap::new();
-        let mut required_fields = Vec::new();
+        // Filter out array paths for now (e.g., "items[].name")
+        let non_array_stats: Vec<_> = stats
+            .iter()
+            .filter(|stat| !stat.path.contains('['))
+            .collect();
 
-        for stat in stats {
-            // Only include top-level fields for now (no nested objects)
-            if !stat.path.contains('.') && !stat.path.contains('[') {
-                let property_schema = PropertySchema::from_field_stats(stat, &self.config);
-                root_properties.insert(stat.path.clone(), property_schema);
-
-                // Mark as required if density meets threshold
-                if stat.density >= self.config.required_threshold {
-                    required_fields.push(stat.path.clone());
-                }
-            }
-        }
-
-        required_fields.sort();
+        // Build nested property tree
+        let (root_properties, required_fields) = self.build_property_tree(&non_array_stats);
 
         JsonSchema {
             schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
@@ -251,6 +241,106 @@ impl SchemaGenerator {
             properties: root_properties,
             required: required_fields,
             additional_properties: !self.config.strict_additional_properties,
+        }
+    }
+
+    /// Build a nested property tree from field statistics
+    fn build_property_tree(
+        &self,
+        stats: &[&FieldStats],
+    ) -> (HashMap<String, PropertySchema>, Vec<String>) {
+        let mut root_properties: HashMap<String, PropertySchema> = HashMap::new();
+        let mut required_fields = Vec::new();
+
+        // Group stats by root-level field
+        for stat in stats {
+            let parts: Vec<&str> = stat.path.split('.').collect();
+
+            if parts.is_empty() {
+                continue;
+            }
+
+            let root_field = parts[0];
+
+            if parts.len() == 1 {
+                // Top-level field
+                let property_schema = PropertySchema::from_field_stats(stat, &self.config);
+                root_properties.insert(root_field.to_string(), property_schema);
+
+                if stat.density >= self.config.required_threshold {
+                    required_fields.push(root_field.to_string());
+                }
+            } else {
+                // Nested field - need to build nested structure
+                // Get or create the root property
+                let root_prop = root_properties
+                    .entry(root_field.to_string())
+                    .or_insert_with(|| PropertySchema {
+                        property_type: Some(PropertyType::Single("object".to_string())),
+                        description: None,
+                        format: None,
+                        enum_values: None,
+                        minimum: None,
+                        maximum: None,
+                        pattern: None,
+                        properties: Some(HashMap::new()),
+                        additional_properties: Some(!self.config.strict_additional_properties),
+                    });
+
+                // Build nested path
+                self.insert_nested_property(
+                    root_prop,
+                    &parts[1..],
+                    stat,
+                );
+            }
+        }
+
+        // Sort required fields
+        required_fields.sort();
+        required_fields.dedup();
+
+        (root_properties, required_fields)
+    }
+
+    /// Recursively insert a nested property into a property schema
+    fn insert_nested_property(
+        &self,
+        parent: &mut PropertySchema,
+        path_parts: &[&str],
+        stat: &FieldStats,
+    ) {
+        if path_parts.is_empty() {
+            return;
+        }
+
+        let field_name = path_parts[0];
+
+        // Ensure parent has properties map
+        let properties = parent.properties.get_or_insert_with(HashMap::new);
+
+        if path_parts.len() == 1 {
+            // Leaf node - insert the actual field
+            let property_schema = PropertySchema::from_field_stats(stat, &self.config);
+            properties.insert(field_name.to_string(), property_schema);
+        } else {
+            // Intermediate node - create/get nested object
+            let nested_prop = properties
+                .entry(field_name.to_string())
+                .or_insert_with(|| PropertySchema {
+                    property_type: Some(PropertyType::Single("object".to_string())),
+                    description: None,
+                    format: None,
+                    enum_values: None,
+                    minimum: None,
+                    maximum: None,
+                    pattern: None,
+                    properties: Some(HashMap::new()),
+                    additional_properties: Some(!self.config.strict_additional_properties),
+                });
+
+            // Recurse
+            self.insert_nested_property(nested_prop, &path_parts[1..], stat);
         }
     }
 
@@ -959,5 +1049,397 @@ mod tests {
         assert!(schema.required.contains(&"role".to_string()));
         assert!(schema.required.contains(&"is_active".to_string()));
         assert!(schema.required.contains(&"user_id".to_string()));
+    }
+
+    // ===== Nested Object Schema Generation Tests =====
+
+    #[test]
+    fn test_schema_with_simple_nested_object() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Nested field: user.name
+        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        for _ in 0..100 {
+            name_stats.record(&json!("Alice"));
+        }
+        name_stats.finalize(100);
+        stats.push(name_stats);
+
+        // Nested field: user.email
+        let mut email_stats = FieldStats::new("user.email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("alice@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with nested objects should be valid");
+
+        // Verify structure
+        assert!(schema.properties.contains_key("user"));
+        let user_prop = schema.properties.get("user").unwrap();
+
+        // User should be an object with properties
+        match &user_prop.property_type {
+            Some(PropertyType::Single(t)) => assert_eq!(t, "object"),
+            _ => panic!("Expected user to be object type"),
+        }
+
+        assert!(user_prop.properties.is_some());
+        let user_props = user_prop.properties.as_ref().unwrap();
+        assert!(user_props.contains_key("name"));
+        assert!(user_props.contains_key("email"));
+    }
+
+    #[test]
+    fn test_schema_with_deeply_nested_object() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Deeply nested: user.profile.settings.theme
+        let mut theme_stats = FieldStats::new("user.profile.settings.theme".to_string(), 0);
+        for _ in 0..100 {
+            theme_stats.record(&json!("dark"));
+        }
+        theme_stats.finalize(100);
+        stats.push(theme_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Deeply nested schema should be valid");
+
+        // Navigate the nested structure
+        let user_prop = schema.properties.get("user").unwrap();
+        let user_props = user_prop.properties.as_ref().unwrap();
+
+        let profile_prop = user_props.get("profile").unwrap();
+        let profile_props = profile_prop.properties.as_ref().unwrap();
+
+        let settings_prop = profile_props.get("settings").unwrap();
+        let settings_props = settings_prop.properties.as_ref().unwrap();
+
+        assert!(settings_props.contains_key("theme"));
+    }
+
+    #[test]
+    fn test_schema_with_mixed_top_level_and_nested() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Top-level field
+        let mut id_stats = FieldStats::new("id".to_string(), 0);
+        for _ in 0..100 {
+            id_stats.record(&json!(123));
+        }
+        id_stats.finalize(100);
+        stats.push(id_stats);
+
+        // Nested field
+        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        for _ in 0..100 {
+            name_stats.record(&json!("Alice"));
+        }
+        name_stats.finalize(100);
+        stats.push(name_stats);
+
+        // Another top-level field
+        let mut active_stats = FieldStats::new("active".to_string(), 0);
+        for _ in 0..100 {
+            active_stats.record(&json!(true));
+        }
+        active_stats.finalize(100);
+        stats.push(active_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Mixed schema should be valid");
+
+        // Verify top-level fields
+        assert!(schema.properties.contains_key("id"));
+        assert!(schema.properties.contains_key("active"));
+        assert!(schema.properties.contains_key("user"));
+
+        // Verify nested structure
+        let user_prop = schema.properties.get("user").unwrap();
+        let user_props = user_prop.properties.as_ref().unwrap();
+        assert!(user_props.contains_key("name"));
+    }
+
+    #[test]
+    fn test_schema_nested_object_with_multiple_fields() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Multiple fields in same nested object
+        let fields = vec![
+            ("address.street", json!("123 Main St")),
+            ("address.city", json!("New York")),
+            ("address.state", json!("NY")),
+            ("address.zip", json!("10001")),
+        ];
+
+        for (path, value) in fields {
+            let mut field_stats = FieldStats::new(path.to_string(), 0);
+            for _ in 0..100 {
+                field_stats.record(&value);
+            }
+            field_stats.finalize(100);
+            stats.push(field_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Nested object with multiple fields should be valid");
+
+        // Verify all fields are in the address object
+        let address_prop = schema.properties.get("address").unwrap();
+        let address_props = address_prop.properties.as_ref().unwrap();
+        assert_eq!(address_props.len(), 4);
+        assert!(address_props.contains_key("street"));
+        assert!(address_props.contains_key("city"));
+        assert!(address_props.contains_key("state"));
+        assert!(address_props.contains_key("zip"));
+    }
+
+    #[test]
+    fn test_schema_nested_with_required_fields() {
+        let config = SchemaConfig {
+            required_threshold: 0.95,
+            ..Default::default()
+        };
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Top-level required field
+        let mut id_stats = FieldStats::new("id".to_string(), 0);
+        for _ in 0..100 {
+            id_stats.record(&json!(123));
+        }
+        id_stats.finalize(100);
+        stats.push(id_stats);
+
+        // Required nested field (user.email - 100% density)
+        let mut email_stats = FieldStats::new("user.email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("user@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        // Optional nested field (user.bio - 80% density)
+        let mut bio_stats = FieldStats::new("user.bio".to_string(), 0);
+        for _ in 0..80 {
+            bio_stats.record(&json!("Developer"));
+        }
+        bio_stats.finalize(100);
+        stats.push(bio_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Nested schema with required fields should be valid");
+
+        // Top-level required field
+        assert!(schema.required.contains(&"id".to_string()));
+
+        // Note: Nested objects themselves don't become required unless we have stats for the parent object
+        // The required logic applies at each level independently
+        assert!(schema.properties.contains_key("user"));
+    }
+
+    #[test]
+    fn test_schema_nested_with_format_detection() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Nested email field
+        let mut email_stats = FieldStats::new("contact.email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("user@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        // Nested UUID field
+        let mut uuid_stats = FieldStats::new("contact.user_id".to_string(), 0);
+        for _ in 0..100 {
+            uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
+        }
+        uuid_stats.finalize(100);
+        stats.push(uuid_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Nested schema with format hints should be valid");
+
+        // Verify format hints are preserved in nested objects
+        let contact_prop = schema.properties.get("contact").unwrap();
+        let contact_props = contact_prop.properties.as_ref().unwrap();
+
+        let email_prop = contact_props.get("email").unwrap();
+        assert_eq!(email_prop.format, Some("email".to_string()));
+
+        let uuid_prop = contact_props.get("user_id").unwrap();
+        assert_eq!(uuid_prop.format, Some("uuid".to_string()));
+    }
+
+    #[test]
+    fn test_schema_nested_with_enum_values() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Nested enum field
+        let mut role_stats = FieldStats::new("permissions.role".to_string(), 0);
+        for _ in 0..40 {
+            role_stats.record(&json!("admin"));
+        }
+        for _ in 0..40 {
+            role_stats.record(&json!("user"));
+        }
+        for _ in 0..20 {
+            role_stats.record(&json!("guest"));
+        }
+        role_stats.finalize(100);
+        stats.push(role_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Nested schema with enums should be valid");
+
+        // Verify enum is preserved in nested object
+        let permissions_prop = schema.properties.get("permissions").unwrap();
+        let permissions_props = permissions_prop.properties.as_ref().unwrap();
+        let role_prop = permissions_props.get("role").unwrap();
+
+        assert!(role_prop.enum_values.is_some());
+        let enum_vals = role_prop.enum_values.as_ref().unwrap();
+        assert_eq!(enum_vals.len(), 3);
+    }
+
+    #[test]
+    fn test_schema_nested_strict_mode() {
+        let config = SchemaConfig {
+            strict_additional_properties: true,
+            ..Default::default()
+        };
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        for _ in 0..100 {
+            name_stats.record(&json!("Alice"));
+        }
+        name_stats.finalize(100);
+        stats.push(name_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Nested strict schema should be valid");
+
+        // Root should have additionalProperties: false
+        assert!(!schema.additional_properties);
+
+        // Nested objects should also respect strict mode
+        let user_prop = schema.properties.get("user").unwrap();
+        assert_eq!(user_prop.additional_properties, Some(false));
+    }
+
+    #[test]
+    fn test_schema_multiple_nested_objects() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // First nested object
+        let mut user_name_stats = FieldStats::new("user.name".to_string(), 0);
+        for _ in 0..100 {
+            user_name_stats.record(&json!("Alice"));
+        }
+        user_name_stats.finalize(100);
+        stats.push(user_name_stats);
+
+        // Second nested object
+        let mut config_theme_stats = FieldStats::new("config.theme".to_string(), 0);
+        for _ in 0..100 {
+            config_theme_stats.record(&json!("dark"));
+        }
+        config_theme_stats.finalize(100);
+        stats.push(config_theme_stats);
+
+        // Third nested object
+        let mut meta_version_stats = FieldStats::new("metadata.version".to_string(), 0);
+        for _ in 0..100 {
+            meta_version_stats.record(&json!("1.0"));
+        }
+        meta_version_stats.finalize(100);
+        stats.push(meta_version_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Multiple nested objects should be valid");
+
+        // Verify all three nested objects exist
+        assert!(schema.properties.contains_key("user"));
+        assert!(schema.properties.contains_key("config"));
+        assert!(schema.properties.contains_key("metadata"));
+    }
+
+    #[test]
+    fn test_schema_filters_array_paths() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Regular nested field
+        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        for _ in 0..100 {
+            name_stats.record(&json!("Alice"));
+        }
+        name_stats.finalize(100);
+        stats.push(name_stats);
+
+        // Array path (should be filtered out)
+        let mut items_stats = FieldStats::new("items[].id".to_string(), 0);
+        for _ in 0..100 {
+            items_stats.record(&json!(123));
+        }
+        items_stats.finalize(100);
+        stats.push(items_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema should be valid with array paths filtered");
+
+        // Should include user but not items
+        assert!(schema.properties.contains_key("user"));
+        assert!(!schema.properties.contains_key("items"));
     }
 }

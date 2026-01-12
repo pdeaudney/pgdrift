@@ -721,3 +721,404 @@ async fn test_schema_format_detection() {
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }
+
+/// Test schema generation with simple nested objects
+#[tokio::test]
+async fn test_schema_simple_nested_objects() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_simple (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert data with nested user object
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i),
+                "age": 25 + (i % 50)
+            },
+            "status": "active"
+        });
+
+        sqlx::query("INSERT INTO nested_simple (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_simple",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate schema with nested objects: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with deeply nested objects
+#[tokio::test]
+async fn test_schema_deeply_nested_objects() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_deep (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert data with 3 levels of nesting
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "profile": {
+                    "settings": {
+                        "theme": "dark",
+                        "notifications": true,
+                        "language": "en"
+                    },
+                    "bio": format!("User bio {}", i)
+                },
+                "email": format!("user{}@example.com", i)
+            },
+            "id": i
+        });
+
+        sqlx::query("INSERT INTO nested_deep (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_deep",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate schema with deeply nested objects: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with mixed top-level and nested fields
+#[tokio::test]
+async fn test_schema_mixed_nested_and_flat() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_mixed (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert data with both flat and nested fields
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "id": i,
+            "status": "active",
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i)
+            },
+            "metadata": {
+                "created_at": "2025-01-12T10:30:00Z",
+                "version": "1.0"
+            },
+            "score": i * 10
+        });
+
+        sqlx::query("INSERT INTO nested_mixed (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_mixed",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate schema with mixed fields: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with nested objects in strict mode
+#[tokio::test]
+async fn test_schema_nested_strict_mode() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_strict (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert consistent nested data
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i)
+            }
+        });
+
+        sqlx::query("INSERT INTO nested_strict (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation with strict mode
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_strict",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        true,  // strict mode
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate strict schema with nested objects: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with multiple sibling nested objects
+#[tokio::test]
+async fn test_schema_multiple_nested_objects() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_multiple (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert data with multiple nested objects
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i)
+            },
+            "config": {
+                "theme": if i % 2 == 0 { "dark" } else { "light" },
+                "language": "en"
+            },
+            "metadata": {
+                "version": "1.0",
+                "created_at": "2025-01-12T10:30:00Z"
+            }
+        });
+
+        sqlx::query("INSERT INTO nested_multiple (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_multiple",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate schema with multiple nested objects: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with nested objects containing format hints
+#[tokio::test]
+async fn test_schema_nested_with_formats() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_formats (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert data with nested fields that should trigger format detection
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "contact": {
+                "email": format!("user{}@example.com", i),
+                "user_id": format!("550e8400-e29b-41d4-a716-{:012}", i)
+            },
+            "timestamps": {
+                "created_at": "2025-01-12T10:30:00Z",
+                "updated_at": "2025-01-12T11:00:00Z"
+            }
+        });
+
+        sqlx::query("INSERT INTO nested_formats (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation - should detect formats in nested objects
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_formats",
+        "data",
+        100,
+        schema::SchemaFormat::JsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate schema with nested format hints: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test schema generation with nested objects and pg_jsonschema format
+#[tokio::test]
+async fn test_schema_nested_pg_jsonschema() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE nested_pg (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert nested data
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i),
+                "age": 25 + (i % 50)
+            }
+        });
+
+        sqlx::query("INSERT INTO nested_pg (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert data");
+    }
+
+    // Run schema generation with pg_jsonschema format
+    let result = schema::run(
+        test_db.database_url(),
+        "nested_pg",
+        "data",
+        100,
+        schema::SchemaFormat::PgJsonSchema,
+        0.95,
+        false,
+        PathFilter::new(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should generate pg_jsonschema with nested objects: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
