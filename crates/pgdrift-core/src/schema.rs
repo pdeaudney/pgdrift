@@ -487,7 +487,7 @@ impl SchemaGenerator {
         all_stats: &[FieldStats],
         parent_path: &str,
     ) -> (HashMap<String, PropertySchema>, Vec<String>) {
-        let mut pattern_groups: HashMap<KeyPattern, Vec<(String, &PropertySchema)>> = HashMap::new();
+        let mut pattern_groups: HashMap<KeyPattern, Vec<String>> = HashMap::new();
         let mut key_densities: HashMap<String, f64> = HashMap::new();
 
         // Collect densities for each child key
@@ -504,7 +504,7 @@ impl SchemaGenerator {
                         pattern_groups
                             .entry(pattern)
                             .or_default()
-                            .push((child_key.clone(), _child_schema));
+                            .push(child_key.clone());
                     }
                 }
             }
@@ -514,74 +514,33 @@ impl SchemaGenerator {
         let mut pattern_properties = HashMap::new();
         let mut excluded_keys = Vec::new();
 
-        for (pattern, key_schema_list) in pattern_groups {
-            if key_schema_list.len() >= 2 {
+        for (pattern, matching_keys) in pattern_groups {
+            if matching_keys.len() >= 2 {
                 let regex = pattern.to_regex();
 
-                // Build merged schema from all matching keys
-                let merged_schema = self.merge_pattern_schemas(&key_schema_list, &pattern, key_schema_list.len());
+                // Build schema from field stats (like root-level patterns)
+                let key_stats_list: Vec<(String, Vec<&FieldStats>)> = matching_keys
+                    .iter()
+                    .map(|key| {
+                        let stats: Vec<&FieldStats> = vec![]; // Not used in build_pattern_value_schema
+                        (key.clone(), stats)
+                    })
+                    .collect();
+
+                let merged_schema = self.build_pattern_value_schema(
+                    all_stats,
+                    parent_path,
+                    &key_stats_list,
+                );
 
                 pattern_properties.insert(regex, merged_schema);
 
                 // Mark keys for exclusion
-                for (key, _) in key_schema_list {
-                    excluded_keys.push(key);
-                }
+                excluded_keys.extend(matching_keys);
             }
         }
 
         (pattern_properties, excluded_keys)
-    }
-
-    /// Merge schemas from multiple keys matching the same pattern
-    fn merge_pattern_schemas(
-        &self,
-        key_schemas: &[(String, &PropertySchema)],
-        _pattern: &KeyPattern,
-        count: usize,
-    ) -> PropertySchema {
-        // For now, take the first schema as a template and merge properties from others
-        // In a more sophisticated version, we'd merge all properties and handle conflicts
-
-        if let Some((_, first_schema)) = key_schemas.first() {
-            let mut merged = (*first_schema).clone();
-
-            // Update description to indicate it's a pattern
-            merged.description = Some(format!(
-                "Dynamic keys matching pattern ({} keys detected)",
-                count
-            ));
-
-            // Merge properties from all schemas
-            if let Some(ref mut merged_props) = merged.properties {
-                for (_, schema) in key_schemas.iter().skip(1) {
-                    if let Some(ref other_props) = schema.properties {
-                        for (prop_key, prop_schema) in other_props {
-                            // Only add if not already present (simple merge strategy)
-                            merged_props.entry(prop_key.clone())
-                                .or_insert_with(|| prop_schema.clone());
-                        }
-                    }
-                }
-            }
-
-            merged
-        } else {
-            // Fallback: create a basic object schema
-            PropertySchema {
-                property_type: Some(PropertyType::Single("object".to_string())),
-                description: Some(format!("Dynamic keys matching pattern ({} keys detected)", count)),
-                format: None,
-                enum_values: None,
-                minimum: None,
-                maximum: None,
-                pattern: None,
-                properties: Some(HashMap::new()),
-                additional_properties: Some(!self.config.strict_additional_properties),
-                items: None,
-            pattern_properties: None,
-            }
-        }
     }
 
     /// Build the value schema for a pattern property
@@ -1054,6 +1013,7 @@ fn is_uuid_format(s: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyPattern {
     Uuid,
+    HexString16, // 16-character hex strings (device IDs, session tokens, etc.)
     // Future patterns: Timestamp, NumericId, etc.
 }
 
@@ -1065,6 +1025,10 @@ impl KeyPattern {
                 // UUID pattern (case-insensitive)
                 "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$".to_string()
             }
+            KeyPattern::HexString16 => {
+                // 16-character hex string (device IDs, session tokens)
+                "^[0-9a-fA-F]{16}$".to_string()
+            }
         }
     }
 
@@ -1072,10 +1036,17 @@ impl KeyPattern {
     fn detect(key: &str) -> Option<Self> {
         if is_uuid_format(key) {
             Some(KeyPattern::Uuid)
+        } else if is_hex_string_16(key) {
+            Some(KeyPattern::HexString16)
         } else {
             None
         }
     }
+}
+
+/// Check if a string is a 16-character hex string
+fn is_hex_string_16(s: &str) -> bool {
+    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Quote a PostgreSQL identifier
@@ -2228,6 +2199,74 @@ mod tests {
         assert!(uuid_schema.properties.is_some());
         let uuid_props = uuid_schema.properties.as_ref().unwrap();
         assert!(uuid_props.contains_key("device_no"), "UUID pattern should include device_no property");
+    }
+
+    #[test]
+    fn test_schema_with_hex_device_ids() {
+        // Test 16-character hex string device IDs (like in user's schema)
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // devices appears in 0.8% of samples
+        let mut devices_stats = FieldStats::new("devices".to_string(), 0);
+        for _ in 0..84 {
+            devices_stats.record(&json!({}));
+        }
+        devices_stats.finalize(total_samples);
+        stats.push(devices_stats);
+
+        // 16-character hex device IDs (lowercase)
+        let hex_ids = vec![
+            "cacfa794927a8c4b",
+            "e79c968dd761ef4f",
+            "55108ee4bc11a3cd",
+        ];
+
+        for hex_id in &hex_ids {
+            let path = format!("devices.{}", hex_id);
+            let mut hex_stats = FieldStats::new(path.clone(), 0);
+            hex_stats.record(&json!({}));
+            hex_stats.finalize(total_samples);
+            stats.push(hex_stats);
+
+            // Each has a device_no field
+            let path = format!("devices.{}.device_no", hex_id);
+            let mut device_no_stats = FieldStats::new(path, 0);
+            device_no_stats.record(&json!(1));
+            device_no_stats.finalize(total_samples);
+            stats.push(device_no_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Schema with hex device IDs ===");
+        println!("{}", schema.to_json_string());
+        println!("===================================\n");
+
+        // devices should be in properties
+        assert!(schema.properties.contains_key("devices"));
+        let devices_prop = schema.properties.get("devices").unwrap();
+
+        // devices should have patternProperties for hex strings
+        assert!(devices_prop.pattern_properties.is_some(), "devices should have patternProperties");
+        let pattern_props = devices_prop.pattern_properties.as_ref().unwrap();
+
+        // Should have hex string pattern
+        let hex_pattern = "^[0-9a-fA-F]{16}$";
+        assert!(pattern_props.contains_key(hex_pattern), "devices should have hex string pattern property");
+
+        // Individual hex IDs should NOT be in properties
+        assert!(devices_prop.properties.is_none() || devices_prop.properties.as_ref().unwrap().is_empty(),
+            "Individual hex keys should be excluded from properties");
+
+        // The pattern should have device_no property
+        let hex_schema = &pattern_props[hex_pattern];
+        assert!(hex_schema.properties.is_some());
+        let hex_props = hex_schema.properties.as_ref().unwrap();
+        assert!(hex_props.contains_key("device_no"), "Hex pattern should include device_no property");
     }
 
     #[test]
