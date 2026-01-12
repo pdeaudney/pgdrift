@@ -104,6 +104,10 @@ pub struct PropertySchema {
     // For arrays
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<PropertySchema>>,
+
+    // For dynamic keys
+    #[serde(rename = "patternProperties", skip_serializing_if = "Option::is_none")]
+    pub pattern_properties: Option<HashMap<String, PropertySchema>>,
 }
 
 impl PropertySchema {
@@ -172,6 +176,7 @@ impl PropertySchema {
             properties: None,
             additional_properties: None,
             items: None,
+            pattern_properties: None,
         }
     }
 }
@@ -257,7 +262,10 @@ impl SchemaGenerator {
         let (pattern_properties, excluded_keys) = self.detect_pattern_properties(stats, "");
 
         // Build nested property tree (excluding keys that match patterns)
-        let (root_properties, required_fields) = self.build_property_tree(stats, &excluded_keys);
+        let (mut root_properties, required_fields) = self.build_property_tree(stats, &excluded_keys);
+
+        // Apply pattern detection recursively to nested objects
+        self.apply_nested_pattern_detection(&mut root_properties, stats);
 
         JsonSchema {
             schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
@@ -436,6 +444,146 @@ impl SchemaGenerator {
         (pattern_properties, excluded_keys)
     }
 
+    /// Apply pattern detection recursively to nested objects
+    fn apply_nested_pattern_detection(
+        &self,
+        properties: &mut HashMap<String, PropertySchema>,
+        all_stats: &[FieldStats],
+    ) {
+        for (prop_name, prop_schema) in properties.iter_mut() {
+            // Only process object types with child properties
+            if let Some(PropertyType::Single(ref type_name)) = prop_schema.property_type {
+                if type_name == "object" {
+                    if let Some(ref mut child_props) = prop_schema.properties {
+                        // Check if child properties should use pattern properties
+                        let (pattern_props, excluded) = self.detect_nested_patterns(
+                            child_props,
+                            all_stats,
+                            prop_name,
+                        );
+
+                        if !pattern_props.is_empty() {
+                            // Remove excluded properties
+                            for key in &excluded {
+                                child_props.remove(key);
+                            }
+
+                            // Add pattern properties to this nested object
+                            prop_schema.pattern_properties = Some(pattern_props);
+                        }
+
+                        // Recurse into child properties
+                        self.apply_nested_pattern_detection(child_props, all_stats);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Detect patterns in nested object properties
+    fn detect_nested_patterns(
+        &self,
+        child_properties: &HashMap<String, PropertySchema>,
+        all_stats: &[FieldStats],
+        parent_path: &str,
+    ) -> (HashMap<String, PropertySchema>, Vec<String>) {
+        let mut pattern_groups: HashMap<KeyPattern, Vec<(String, &PropertySchema)>> = HashMap::new();
+        let mut key_densities: HashMap<String, f64> = HashMap::new();
+
+        // Collect densities for each child key
+        for (child_key, _child_schema) in child_properties {
+            let full_path = format!("{}.{}", parent_path, child_key);
+
+            // Find the stat for this path
+            if let Some(stat) = all_stats.iter().find(|s| s.path == full_path) {
+                key_densities.insert(child_key.clone(), stat.density);
+
+                // Check if this is a ghost key and matches a pattern
+                if stat.density <= self.config.ghost_key_threshold {
+                    if let Some(pattern) = KeyPattern::detect(child_key) {
+                        pattern_groups
+                            .entry(pattern)
+                            .or_default()
+                            .push((child_key.clone(), _child_schema));
+                    }
+                }
+            }
+        }
+
+        // Build pattern properties for patterns with >= 2 keys
+        let mut pattern_properties = HashMap::new();
+        let mut excluded_keys = Vec::new();
+
+        for (pattern, key_schema_list) in pattern_groups {
+            if key_schema_list.len() >= 2 {
+                let regex = pattern.to_regex();
+
+                // Build merged schema from all matching keys
+                let merged_schema = self.merge_pattern_schemas(&key_schema_list, &pattern, key_schema_list.len());
+
+                pattern_properties.insert(regex, merged_schema);
+
+                // Mark keys for exclusion
+                for (key, _) in key_schema_list {
+                    excluded_keys.push(key);
+                }
+            }
+        }
+
+        (pattern_properties, excluded_keys)
+    }
+
+    /// Merge schemas from multiple keys matching the same pattern
+    fn merge_pattern_schemas(
+        &self,
+        key_schemas: &[(String, &PropertySchema)],
+        _pattern: &KeyPattern,
+        count: usize,
+    ) -> PropertySchema {
+        // For now, take the first schema as a template and merge properties from others
+        // In a more sophisticated version, we'd merge all properties and handle conflicts
+
+        if let Some((_, first_schema)) = key_schemas.first() {
+            let mut merged = (*first_schema).clone();
+
+            // Update description to indicate it's a pattern
+            merged.description = Some(format!(
+                "Dynamic keys matching pattern ({} keys detected)",
+                count
+            ));
+
+            // Merge properties from all schemas
+            if let Some(ref mut merged_props) = merged.properties {
+                for (_, schema) in key_schemas.iter().skip(1) {
+                    if let Some(ref other_props) = schema.properties {
+                        for (prop_key, prop_schema) in other_props {
+                            // Only add if not already present (simple merge strategy)
+                            merged_props.entry(prop_key.clone())
+                                .or_insert_with(|| prop_schema.clone());
+                        }
+                    }
+                }
+            }
+
+            merged
+        } else {
+            // Fallback: create a basic object schema
+            PropertySchema {
+                property_type: Some(PropertyType::Single("object".to_string())),
+                description: Some(format!("Dynamic keys matching pattern ({} keys detected)", count)),
+                format: None,
+                enum_values: None,
+                minimum: None,
+                maximum: None,
+                pattern: None,
+                properties: Some(HashMap::new()),
+                additional_properties: Some(!self.config.strict_additional_properties),
+                items: None,
+            pattern_properties: None,
+            }
+        }
+    }
+
     /// Build the value schema for a pattern property
     fn build_pattern_value_schema(
         &self,
@@ -496,6 +644,7 @@ impl SchemaGenerator {
             properties: Some(nested_properties),
             additional_properties: Some(!self.config.strict_additional_properties),
             items: None,
+            pattern_properties: None,
         }
     }
 
@@ -553,6 +702,7 @@ impl SchemaGenerator {
             properties: Some(properties),
             additional_properties: Some(!self.config.strict_additional_properties),
             items: None,
+            pattern_properties: None,
         }))
     }
 
@@ -609,6 +759,7 @@ impl SchemaGenerator {
                         properties: None,
                         additional_properties: None,
                         items: None,
+            pattern_properties: None,
                     });
             } else {
                 // Nested field - build nested structure
@@ -629,6 +780,7 @@ impl SchemaGenerator {
                                 properties: Some(HashMap::new()),
                                 additional_properties: Some(!self.config.strict_additional_properties),
                                 items: None,
+            pattern_properties: None,
                             };
 
                             PropertySchema {
@@ -642,6 +794,7 @@ impl SchemaGenerator {
                                 properties: None,
                                 additional_properties: None,
                                 items: Some(Box::new(items_schema)),
+            pattern_properties: None,
                             }
                         });
 
@@ -664,6 +817,7 @@ impl SchemaGenerator {
                             properties: Some(HashMap::new()),
                             additional_properties: Some(!self.config.strict_additional_properties),
                             items: None,
+            pattern_properties: None,
                         });
 
                     // Build nested path
@@ -725,6 +879,7 @@ impl SchemaGenerator {
                     properties: None,
                     additional_properties: None,
                     items: None,
+            pattern_properties: None,
                 });
         } else {
             // Intermediate node
@@ -753,7 +908,9 @@ impl SchemaGenerator {
                             properties: Some(HashMap::new()),
                             additional_properties: Some(!self.config.strict_additional_properties),
                             items: None,
+                            pattern_properties: None,
                         })),
+                        pattern_properties: None,
                     });
 
                 // Recurse into the items
@@ -775,6 +932,7 @@ impl SchemaGenerator {
                         properties: Some(HashMap::new()),
                         additional_properties: Some(!self.config.strict_additional_properties),
                         items: None,
+            pattern_properties: None,
                     });
 
                 // Recurse
@@ -904,8 +1062,8 @@ impl KeyPattern {
     fn to_regex(&self) -> String {
         match self {
             KeyPattern::Uuid => {
-                // UUID v4 pattern (lowercase)
-                "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$".to_string()
+                // UUID pattern (case-insensitive)
+                "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$".to_string()
             }
         }
     }
@@ -1990,7 +2148,7 @@ mod tests {
 
         // Should have UUID pattern
         assert_eq!(pattern_props.len(), 1);
-        let uuid_pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+        let uuid_pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
         assert!(pattern_props.contains_key(uuid_pattern));
 
         // The UUID pattern should have an object schema with name and email properties
@@ -2002,6 +2160,74 @@ mod tests {
 
         // UUID keys should NOT be in regular properties (they're excluded)
         assert!(schema.properties.is_empty(), "UUID keys should be excluded from properties when using patternProperties");
+    }
+
+    #[test]
+    fn test_schema_with_nested_uuid_devices() {
+        // Simulate the user's actual case: devices object with UUID keys
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 10000;
+
+        // devices appears in 0.8% of samples (ghost key)
+        let mut devices_stats = FieldStats::new("devices".to_string(), 0);
+        for _ in 0..78 {
+            devices_stats.record(&json!({}));
+        }
+        devices_stats.finalize(total_samples);
+        stats.push(devices_stats);
+
+        // Multiple UUID keys under devices, each appearing in 0.0% (1/10000)
+        let uuid_keys = vec![
+            "5ED97224-A716-40C5-B795-7337ECBE3FB6",
+            "2B9E0537-FAD4-4C92-8DAB-70E87F482745",
+            "B9D462E8-D27E-4884-AE98-8653E7BE338B",
+        ];
+
+        for uuid in &uuid_keys {
+            let path = format!("devices.{}", uuid);
+            let mut uuid_stats = FieldStats::new(path.clone(), 0);
+            uuid_stats.record(&json!({}));
+            uuid_stats.finalize(total_samples);
+            stats.push(uuid_stats);
+
+            // Each has a device_no field
+            let path = format!("devices.{}.device_no", uuid);
+            let mut device_no_stats = FieldStats::new(path, 0);
+            device_no_stats.record(&json!(1));
+            device_no_stats.finalize(total_samples);
+            stats.push(device_no_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+
+        println!("\n=== Schema with nested UUID devices ===");
+        println!("{}", schema.to_json_string());
+        println!("========================================\n");
+
+        // devices should be in properties
+        assert!(schema.properties.contains_key("devices"));
+        let devices_prop = schema.properties.get("devices").unwrap();
+
+        // devices should have patternProperties for UUIDs
+        assert!(devices_prop.pattern_properties.is_some(), "devices should have patternProperties");
+        let pattern_props = devices_prop.pattern_properties.as_ref().unwrap();
+
+        // Should have UUID pattern
+        let uuid_pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        assert!(pattern_props.contains_key(uuid_pattern), "devices should have UUID pattern property");
+
+        // Individual UUIDs should NOT be in properties
+        assert!(devices_prop.properties.is_none() || devices_prop.properties.as_ref().unwrap().is_empty(),
+            "Individual UUID keys should be excluded from properties");
+
+        // The pattern should have device_no property
+        let uuid_schema = &pattern_props[uuid_pattern];
+        assert!(uuid_schema.properties.is_some());
+        let uuid_props = uuid_schema.properties.as_ref().unwrap();
+        assert!(uuid_props.contains_key("device_no"), "UUID pattern should include device_no property");
     }
 
     #[test]
