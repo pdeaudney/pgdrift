@@ -113,7 +113,7 @@ fn print_schema_result(
 ) {
     match format {
         SchemaFormat::JsonSchema => {
-            println!("\n--- JSON Schema (Draft-07) ---\n");
+            println!("\n--- JSON Schema (2020-12) ---\n");
             println!("{}", schema.to_json_string());
         }
         SchemaFormat::PgJsonSchema => {

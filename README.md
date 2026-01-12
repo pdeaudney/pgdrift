@@ -399,7 +399,7 @@ pgdrift migrate users metadata --format markdown > migration-guide.md
 
 ### Generating JSON Schemas
 
-Generate JSON Schema definitions (draft-07) with optional pg_jsonschema CHECK constraints:
+Generate JSON Schema definitions (2020-12) with optional pg_jsonschema CHECK constraints:
 
 ```bash
 pgdrift schema users metadata --database-url $DATABASE_URL
@@ -417,10 +417,10 @@ Analyzing 5000 samples...
 Generated schema with 8 properties
 Required fields: 2
 
---- JSON Schema (Draft-07) ---
+--- JSON Schema (2020-12) ---
 
 {
-  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "public.users.metadata schema",
   "description": "Auto-generated from 5000 samples",
   "type": "object",
@@ -515,7 +515,7 @@ ALTER TABLE public.users
   CHECK (
     json_matches_schema(
       '{
-        "$schema": "https://json-schema.org/draft-07/schema#",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "email": {"type": "string", "format": "email"},
@@ -573,6 +573,56 @@ CREATE EXTENSION IF NOT EXISTS pg_jsonschema;
 **Note:** pg_jsonschema must be installed by a superuser. For cloud PostgreSQL services (AWS RDS, Azure, etc.), check if the extension is available or contact support.
 
 **Important:** The schema command only generates JSON Schema and SQL files. It never creates CHECK constraints or modifies your database. Always test generated schemas against existing data before applying constraints.
+
+#### Practical Usage Examples
+
+**Example 1: Enforce user metadata schema**
+
+```bash
+# Generate schema for user metadata
+pgdrift schema users metadata --strict > user-schema.json
+
+# Generate and apply pg_jsonschema constraint
+pgdrift schema users metadata --format pg-jsonschema --strict > add-user-schema.sql
+
+# Review the SQL, then apply (on staging first!)
+psql -h staging-db -f add-user-schema.sql
+
+# Test with valid data (should succeed)
+INSERT INTO users (name, metadata) VALUES (
+  'Alice',
+  '{"email": "alice@example.com", "is_active": true}'
+);
+
+# Test with invalid data (should fail)
+INSERT INTO users (name, metadata) VALUES (
+  'Bob',
+  '{"email": "not-an-email", "extra_field": "not allowed"}'  -- Fails: invalid format, strict mode
+);
+```
+
+**Example 2: Gradual schema migration**
+
+```bash
+# Start with relaxed schema (no additionalProperties restriction)
+pgdrift schema orders metadata > orders-schema-v1.json
+
+# After cleanup, switch to strict mode
+pgdrift schema orders metadata --strict --required-threshold 0.99 > orders-schema-v2.json
+
+# Compare schemas to understand the difference
+diff orders-schema-v1.json orders-schema-v2.json
+```
+
+**Example 3: Combine with path filtering**
+
+```bash
+# Generate schema excluding internal/debug fields
+pgdrift schema logs data \
+  --ignore-path "_internal.*" \
+  --ignore-path "debug.*" \
+  --format pg-jsonschema > logs-schema.sql
+```
 
 ### Output Formats
 
@@ -939,7 +989,7 @@ pgdrift is under active development. Completed and planned features:
 **v0.2.0 - Current** ✅
 
 - ✅ Migration guide generation (JSONB → native columns)
-- ✅ JSON Schema generation (draft-07)
+- ✅ JSON Schema generation (2020-12)
 - ✅ pg_jsonschema CHECK constraint support
 - ✅ Path filtering with .pgdrift-ignore.toml config
 
@@ -978,5 +1028,6 @@ Built with:
 - [clap](https://github.com/clap-rs/clap) - Command line argument parsing
 - [tabled](https://github.com/zhiburt/tabled) - ASCII table formatting
 - [serde_json](https://github.com/serde-rs/json) - JSON parsing and manipulation
+- [jsonschema](https://github.com/Stranger6667/jsonschema-rs) - JSON Schema validation (testing)
 
 Inspired by the need for better tooling around semi-structured data in relational databases.

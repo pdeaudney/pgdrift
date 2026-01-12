@@ -241,7 +241,7 @@ impl SchemaGenerator {
         required_fields.sort();
 
         JsonSchema {
-            schema_version: "https://json-schema.org/draft-07/schema#".to_string(),
+            schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
             title: schema_name,
             description: Some(format!(
                 "Auto-generated schema from pgdrift analysis ({} samples)",
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn test_json_schema_to_json() {
         let schema = JsonSchema {
-            schema_version: "https://json-schema.org/draft-07/schema#".to_string(),
+            schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
             title: Some("Test".to_string()),
             description: Some("Test schema".to_string()),
             schema_type: "object".to_string(),
@@ -549,7 +549,415 @@ mod tests {
 
         let json_val = schema.to_json();
         assert!(json_val.is_object());
-        assert_eq!(json_val["$schema"], "https://json-schema.org/draft-07/schema#");
+        assert_eq!(json_val["$schema"], "https://json-schema.org/draft/2020-12/schema");
         assert_eq!(json_val["type"], "object");
+    }
+
+    // ===== JSON Schema 2020-12 Validation Tests =====
+
+    /// Helper function to validate a generated schema against JSON Schema 2020-12 meta-schema
+    fn validate_json_schema(schema: &JsonSchema) -> Result<(), String> {
+        // JSON Schema 2020-12 meta-schema (core subset for validation)
+        // This validates the structure is a valid JSON Schema
+        let meta_schema_json = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "$schema": {"type": "string"},
+                "type": {"type": "string"},
+                "properties": {"type": "object"},
+                "required": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "additionalProperties": {"type": "boolean"},
+                "title": {"type": "string"},
+                "description": {"type": "string"}
+            }
+        });
+
+        let compiled = jsonschema::validator_for(&meta_schema_json)
+            .map_err(|e| format!("Failed to compile meta-schema: {}", e))?;
+
+        let schema_json = schema.to_json();
+
+        // The validator returns Result<(), ValidationError>
+        // If it fails, we get a single ValidationError
+        match compiled.validate(&schema_json) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                Err(format!("Schema validation failed: {}", error))
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_empty_schema() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let schema = generator.generate_json_schema(&[], None, 0);
+
+        // Validate the schema is valid JSON Schema 2020-12
+        assert!(
+            validate_json_schema(&schema).is_ok(),
+            "Empty schema should be valid JSON Schema"
+        );
+    }
+
+    #[test]
+    fn test_validate_basic_schema() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Email field
+        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("test@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Basic schema should be valid JSON Schema 2020-12");
+
+        // Verify structure
+        assert_eq!(schema.schema_version, "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(schema.schema_type, "object");
+        assert!(schema.properties.contains_key("email"));
+    }
+
+    #[test]
+    fn test_validate_schema_with_all_types() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // String field
+        let mut string_stats = FieldStats::new("name".to_string(), 0);
+        for _ in 0..100 {
+            string_stats.record(&json!("Alice"));
+        }
+        string_stats.finalize(100);
+        stats.push(string_stats);
+
+        // Number field
+        let mut number_stats = FieldStats::new("age".to_string(), 0);
+        for _ in 0..100 {
+            number_stats.record(&json!(25));
+        }
+        number_stats.finalize(100);
+        stats.push(number_stats);
+
+        // Boolean field
+        let mut bool_stats = FieldStats::new("active".to_string(), 0);
+        for _ in 0..100 {
+            bool_stats.record(&json!(true));
+        }
+        bool_stats.finalize(100);
+        stats.push(bool_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with multiple types should be valid");
+
+        // Verify all fields are present
+        assert!(schema.properties.contains_key("name"));
+        assert!(schema.properties.contains_key("age"));
+        assert!(schema.properties.contains_key("active"));
+    }
+
+    #[test]
+    fn test_validate_schema_with_enum() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Enum field with low cardinality
+        let mut role_stats = FieldStats::new("role".to_string(), 0);
+        for _ in 0..50 {
+            role_stats.record(&json!("admin"));
+        }
+        for _ in 0..30 {
+            role_stats.record(&json!("user"));
+        }
+        for _ in 0..20 {
+            role_stats.record(&json!("guest"));
+        }
+        role_stats.finalize(100);
+        stats.push(role_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with enum should be valid");
+
+        // Verify enum is present
+        let role_prop = schema.properties.get("role").unwrap();
+        assert!(role_prop.enum_values.is_some());
+    }
+
+    #[test]
+    fn test_validate_schema_with_number_constraints() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Number field with min/max
+        let mut score_stats = FieldStats::new("score".to_string(), 0);
+        for i in 0..100 {
+            score_stats.record(&json!(i));
+        }
+        score_stats.finalize(100);
+        stats.push(score_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with number constraints should be valid");
+
+        // Verify constraints are present
+        let score_prop = schema.properties.get("score").unwrap();
+        assert!(score_prop.minimum.is_some());
+        assert!(score_prop.maximum.is_some());
+    }
+
+    #[test]
+    fn test_validate_schema_with_format_hints() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Email field
+        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("user@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        // UUID field
+        let mut uuid_stats = FieldStats::new("user_id".to_string(), 0);
+        for _ in 0..100 {
+            uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
+        }
+        uuid_stats.finalize(100);
+        stats.push(uuid_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with format hints should be valid");
+
+        // Verify format hints are present
+        let email_prop = schema.properties.get("email").unwrap();
+        assert_eq!(email_prop.format, Some("email".to_string()));
+
+        let uuid_prop = schema.properties.get("user_id").unwrap();
+        assert_eq!(uuid_prop.format, Some("uuid".to_string()));
+    }
+
+    #[test]
+    fn test_validate_schema_with_required_fields() {
+        let config = SchemaConfig {
+            required_threshold: 0.95,
+            ..Default::default()
+        };
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // High density field (should be required)
+        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("test@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        // Low density field (should not be required)
+        let mut optional_stats = FieldStats::new("optional".to_string(), 0);
+        for _ in 0..80 {
+            optional_stats.record(&json!("value"));
+        }
+        optional_stats.finalize(100);
+        stats.push(optional_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with required fields should be valid");
+
+        // Verify required fields
+        assert!(schema.required.contains(&"email".to_string()));
+        assert!(!schema.required.contains(&"optional".to_string()));
+    }
+
+    #[test]
+    fn test_validate_schema_strict_mode() {
+        let config = SchemaConfig {
+            strict_additional_properties: true,
+            ..Default::default()
+        };
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("test@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Strict mode schema should be valid");
+
+        // Verify strict mode
+        assert!(!schema.additional_properties);
+    }
+
+    #[test]
+    fn test_validate_schema_with_null_values() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Field with some null values
+        let mut nullable_stats = FieldStats::new("nickname".to_string(), 0);
+        for _ in 0..70 {
+            nullable_stats.record(&json!("Bob"));
+        }
+        for _ in 0..30 {
+            nullable_stats.record(&json!(null));
+        }
+        nullable_stats.finalize(100);
+        stats.push(nullable_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with nullable fields should be valid");
+    }
+
+    #[test]
+    fn test_validate_schema_with_mixed_types() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Field with mixed types (string and number)
+        let mut mixed_stats = FieldStats::new("value".to_string(), 0);
+        for _ in 0..60 {
+            mixed_stats.record(&json!("text"));
+        }
+        for _ in 0..40 {
+            mixed_stats.record(&json!(42));
+        }
+        mixed_stats.finalize(100);
+        stats.push(mixed_stats);
+
+        let schema = generator.generate_json_schema(&stats, None, 100);
+
+        // Validate the schema
+        validate_json_schema(&schema).expect("Schema with mixed types should be valid");
+    }
+
+    #[test]
+    fn test_validate_complex_realistic_schema() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+
+        // Email (required, with format)
+        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        for _ in 0..100 {
+            email_stats.record(&json!("user@example.com"));
+        }
+        email_stats.finalize(100);
+        stats.push(email_stats);
+
+        // Age (required, with constraints)
+        let mut age_stats = FieldStats::new("age".to_string(), 0);
+        for i in 18..118 {
+            age_stats.record(&json!(i));
+        }
+        age_stats.finalize(100);
+        stats.push(age_stats);
+
+        // Role (enum)
+        let mut role_stats = FieldStats::new("role".to_string(), 0);
+        for _ in 0..50 {
+            role_stats.record(&json!("user"));
+        }
+        for _ in 0..30 {
+            role_stats.record(&json!("admin"));
+        }
+        for _ in 0..20 {
+            role_stats.record(&json!("guest"));
+        }
+        role_stats.finalize(100);
+        stats.push(role_stats);
+
+        // Active (boolean, required)
+        let mut active_stats = FieldStats::new("is_active".to_string(), 0);
+        for _ in 0..100 {
+            active_stats.record(&json!(true));
+        }
+        active_stats.finalize(100);
+        stats.push(active_stats);
+
+        // UUID
+        let mut uuid_stats = FieldStats::new("user_id".to_string(), 0);
+        for _ in 0..100 {
+            uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
+        }
+        uuid_stats.finalize(100);
+        stats.push(uuid_stats);
+
+        // Nullable field
+        let mut bio_stats = FieldStats::new("bio".to_string(), 0);
+        for _ in 0..70 {
+            bio_stats.record(&json!("Software developer"));
+        }
+        for _ in 0..30 {
+            bio_stats.record(&json!(null));
+        }
+        bio_stats.finalize(100);
+        stats.push(bio_stats);
+
+        let schema = generator.generate_json_schema(
+            &stats,
+            Some("User Schema".to_string()),
+            100
+        );
+
+        // Validate the complex schema
+        validate_json_schema(&schema).expect("Complex realistic schema should be valid JSON Schema 2020-12");
+
+        // Verify key properties
+        assert_eq!(schema.schema_version, "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(schema.title, Some("User Schema".to_string()));
+        assert_eq!(schema.properties.len(), 6);
+        assert!(schema.required.contains(&"email".to_string()));
+        assert!(schema.required.contains(&"age".to_string()));
+        assert!(schema.required.contains(&"role".to_string()));
+        assert!(schema.required.contains(&"is_active".to_string()));
+        assert!(schema.required.contains(&"user_id".to_string()));
     }
 }

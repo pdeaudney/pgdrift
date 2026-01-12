@@ -22,3 +22,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 pgdrift-db = { workspace = true }
 sqlx = { workspace = true }
+jsonschema = "0.38"
