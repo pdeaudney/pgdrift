@@ -1,5 +1,6 @@
 use pgdrift::commands::schema;
 use pgdrift_core::filter::PathFilter;
+use pgdrift_core::pattern::PatternConfig;
 use pgdrift_db::fixtures;
 use pgdrift_db::test_utils::TestDb;
 
@@ -22,6 +23,7 @@ async fn test_schema_consistent_schema() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -49,6 +51,7 @@ async fn test_schema_pg_jsonschema_format() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -76,6 +79,7 @@ async fn test_schema_strict_mode() {
         0.95,
         true, // strict mode
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -103,6 +107,7 @@ async fn test_schema_relaxed_mode() {
         0.95,
         false, // relaxed mode
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -130,6 +135,7 @@ async fn test_schema_required_threshold() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -145,6 +151,7 @@ async fn test_schema_required_threshold() {
         0.8,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -172,6 +179,7 @@ async fn test_schema_with_schema_prefix() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -199,6 +207,7 @@ async fn test_schema_type_inconsistency() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -226,6 +235,7 @@ async fn test_schema_handles_deep_nesting() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -257,6 +267,7 @@ async fn test_schema_with_path_filter() {
         0.95,
         false,
         filter,
+        PatternConfig::new(),
     )
     .await;
 
@@ -280,6 +291,7 @@ async fn test_schema_invalid_table() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -307,6 +319,7 @@ async fn test_schema_invalid_column() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -341,6 +354,7 @@ async fn test_schema_empty_column() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -367,6 +381,7 @@ async fn test_schema_invalid_database_url() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -407,6 +422,7 @@ async fn test_schema_all_null_column() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -448,6 +464,7 @@ async fn test_schema_sql_injection_table_name() {
             0.95,
             false,
             PathFilter::new(),
+            PatternConfig::new(),
         )
         .await;
 
@@ -503,6 +520,7 @@ async fn test_schema_empty_json_objects() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -534,6 +552,7 @@ async fn test_schema_schema_evolution() {
         0.4, // Lower threshold to include evolving fields
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -561,6 +580,7 @@ async fn test_schema_extreme_thresholds() {
         1.0,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -576,6 +596,7 @@ async fn test_schema_extreme_thresholds() {
         0.0,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -589,28 +610,28 @@ async fn test_schema_extreme_thresholds() {
 fn test_schema_format_from_str() {
     // Test valid formats
     assert!(matches!(
-        schema::SchemaFormat::from_str("json-schema").unwrap(),
+        "json-schema".parse::<schema::SchemaFormat>().unwrap(),
         schema::SchemaFormat::JsonSchema
     ));
     assert!(matches!(
-        schema::SchemaFormat::from_str("json").unwrap(),
+        "json".parse::<schema::SchemaFormat>().unwrap(),
         schema::SchemaFormat::JsonSchema
     ));
     assert!(matches!(
-        schema::SchemaFormat::from_str("pg-jsonschema").unwrap(),
+        "pg-jsonschema".parse::<schema::SchemaFormat>().unwrap(),
         schema::SchemaFormat::PgJsonSchema
     ));
     assert!(matches!(
-        schema::SchemaFormat::from_str("pg").unwrap(),
+        "pg".parse::<schema::SchemaFormat>().unwrap(),
         schema::SchemaFormat::PgJsonSchema
     ));
     assert!(matches!(
-        schema::SchemaFormat::from_str("sql").unwrap(),
+        "sql".parse::<schema::SchemaFormat>().unwrap(),
         schema::SchemaFormat::PgJsonSchema
     ));
 
     // Test invalid format
-    assert!(schema::SchemaFormat::from_str("invalid").is_err());
+    assert!("invalid".parse::<schema::SchemaFormat>().is_err());
 }
 
 /// Test schema with field type mutation (object -> primitive -> array)
@@ -656,6 +677,7 @@ async fn test_schema_field_type_mutation() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -710,14 +732,11 @@ async fn test_schema_format_detection() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
-    assert!(
-        result.is_ok(),
-        "Should detect formats: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should detect formats: {:?}", result.err());
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }
@@ -765,6 +784,7 @@ async fn test_schema_simple_nested_objects() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -826,6 +846,7 @@ async fn test_schema_deeply_nested_objects() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -886,6 +907,7 @@ async fn test_schema_mixed_nested_and_flat() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -937,8 +959,9 @@ async fn test_schema_nested_strict_mode() {
         100,
         schema::SchemaFormat::JsonSchema,
         0.95,
-        true,  // strict mode
+        true, // strict mode
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -1000,6 +1023,7 @@ async fn test_schema_multiple_nested_objects() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -1057,6 +1081,7 @@ async fn test_schema_nested_with_formats() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 
@@ -1111,6 +1136,7 @@ async fn test_schema_nested_pg_jsonschema() {
         0.95,
         false,
         PathFilter::new(),
+        PatternConfig::new(),
     )
     .await;
 

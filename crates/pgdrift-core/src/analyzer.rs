@@ -1,10 +1,13 @@
 use crate::filter::PathFilter;
+use crate::interner::StringInterner;
 use crate::stats::FieldStats;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct JsonAnalyzer {
-    stats: HashMap<String, FieldStats>,
+    stats: HashMap<Arc<str>, FieldStats>,
+    interner: StringInterner,
     total_samples: u64,
     filter: PathFilter,
     root_is_array: Option<bool>,
@@ -20,6 +23,7 @@ impl JsonAnalyzer {
     pub fn new() -> Self {
         Self {
             stats: HashMap::new(),
+            interner: StringInterner::with_common_paths(),
             total_samples: 0,
             filter: PathFilter::new(),
             root_is_array: None,
@@ -30,6 +34,7 @@ impl JsonAnalyzer {
     pub fn with_filter(filter: PathFilter) -> Self {
         Self {
             stats: HashMap::new(),
+            interner: StringInterner::with_common_paths(),
             total_samples: 0,
             filter,
             root_is_array: None,
@@ -47,21 +52,25 @@ impl JsonAnalyzer {
 
         // For root-level arrays, record the array itself
         if value.is_array() {
-            self.record_field("[]", value, 0);
+            let array_path = self.interner.intern("[]");
+            self.record_field(array_path, value, 0);
         }
 
-        self.walk("", value, 0);
+        let empty_path = self.interner.intern("");
+        self.walk(empty_path, value, 0);
     }
 
     /// Recursive walk
-    fn walk(&mut self, path: &str, value: &Value, depth: usize) {
+    fn walk(&mut self, path: Arc<str>, value: &Value, depth: usize) {
         match value {
             Value::Object(map) => {
                 for (key, val) in map {
+                    // Build path once and intern it
                     let field_path = if path.is_empty() {
-                        key.clone()
+                        self.interner.intern(key)
                     } else {
-                        format!("{}.{}", path, key)
+                        let full_path = format!("{}.{}", path, key);
+                        self.interner.intern(&full_path)
                     };
 
                     // Check if this path should be ignored
@@ -69,16 +78,21 @@ impl JsonAnalyzer {
                         continue; // Skip this path and its children
                     }
 
-                    self.record_field(&field_path, val, depth + 1);
+                    self.record_field(Arc::clone(&field_path), val, depth + 1);
 
-                    self.walk(&field_path, val, depth + 1);
+                    self.walk(field_path, val, depth + 1);
                 }
             }
             Value::Array(arr) => {
-                let array_path = format!("{}[]", path);
+                let array_path = if path.is_empty() {
+                    self.interner.intern("[]")
+                } else {
+                    let full_path = format!("{}[]", path);
+                    self.interner.intern(&full_path)
+                };
 
                 for item in arr {
-                    self.walk(&array_path, item, depth + 1);
+                    self.walk(Arc::clone(&array_path), item, depth + 1);
                 }
             }
             _ => {
@@ -87,10 +101,10 @@ impl JsonAnalyzer {
         }
     }
 
-    fn record_field(&mut self, path: &str, value: &Value, depth: usize) {
+    fn record_field(&mut self, path: Arc<str>, value: &Value, depth: usize) {
         self.stats
-            .entry(path.to_string())
-            .or_insert_with(|| FieldStats::new(path.to_string(), depth))
+            .entry(Arc::clone(&path))
+            .or_insert_with(|| FieldStats::new(path, depth))
             .record(value);
     }
 
@@ -99,7 +113,7 @@ impl JsonAnalyzer {
         self.root_is_array.unwrap_or(false)
     }
 
-    pub fn finalize(mut self) -> HashMap<String, FieldStats> {
+    pub fn finalize(mut self) -> HashMap<Arc<str>, FieldStats> {
         for stats in self.stats.values_mut() {
             stats.finalize(self.total_samples);
         }
@@ -345,10 +359,8 @@ mod tests {
     fn test_filter_multiple_patterns() {
         use crate::filter::PathFilter;
 
-        let filter = PathFilter::with_patterns(vec![
-            "debug.*".to_string(),
-            "temp.session".to_string(),
-        ]);
+        let filter =
+            PathFilter::with_patterns(vec!["debug.*".to_string(), "temp.session".to_string()]);
         let mut analyzer = JsonAnalyzer::with_filter(filter);
 
         analyzer.analyze(&json!({

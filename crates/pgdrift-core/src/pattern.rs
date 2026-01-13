@@ -58,17 +58,17 @@ impl PatternConfig {
 
     /// Add additional patterns to the config
     pub fn add_patterns(&mut self, patterns: Vec<String>) {
-        self.custom_patterns.extend(
-            patterns.into_iter().map(|regex| CustomPattern {
+        self.custom_patterns
+            .extend(patterns.into_iter().map(|regex| CustomPattern {
                 regex,
                 description: None,
-            }),
-        );
+            }));
     }
 
     /// Add a custom pattern with a description
     pub fn add_pattern(&mut self, regex: String, description: Option<String>) {
-        self.custom_patterns.push(CustomPattern { regex, description });
+        self.custom_patterns
+            .push(CustomPattern { regex, description });
     }
 
     /// Get all configured custom patterns
@@ -123,7 +123,11 @@ mod tests {
 
         assert_eq!(config.patterns().len(), 2);
         assert!(config.matches("123456").is_some());
-        assert!(config.matches("session_abcdef0123456789abcdef0123456789").is_some());
+        assert!(
+            config
+                .matches("session_abcdef0123456789abcdef0123456789")
+                .is_some()
+        );
         assert!(config.matches("invalid").is_none());
     }
 
@@ -140,10 +144,7 @@ mod tests {
     #[test]
     fn test_add_pattern_with_description() {
         let mut config = PatternConfig::new();
-        config.add_pattern(
-            "^[0-9]{6}$".to_string(),
-            Some("6-digit IDs".to_string()),
-        );
+        config.add_pattern("^[0-9]{6}$".to_string(), Some("6-digit IDs".to_string()));
 
         let patterns = config.patterns();
         assert_eq!(patterns.len(), 1);
@@ -223,10 +224,16 @@ regex = "^api_key_[A-Za-z0-9]{40}$"
 
         // Test matching
         assert!(config.matches("123456").is_some());
-        assert!(config.matches("session_abcdef0123456789abcdef0123456789").is_some());
-        assert!(config
-            .matches("api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD")
-            .is_some());
+        assert!(
+            config
+                .matches("session_abcdef0123456789abcdef0123456789")
+                .is_some()
+        );
+        assert!(
+            config
+                .matches("api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD")
+                .is_some()
+        );
     }
 
     #[test]
@@ -241,8 +248,8 @@ regex = "^api_key_[A-Za-z0-9]{40}$"
     #[test]
     fn test_invalid_regex_ignored() {
         let config = PatternConfig::with_patterns(vec![
-            "^[0-9]{6}$".to_string(),  // Valid
-            "[invalid(".to_string(),    // Invalid regex
+            "^[0-9]{6}$".to_string(), // Valid
+            "[invalid(".to_string(),  // Invalid regex
         ]);
 
         // Valid pattern should still work
@@ -269,7 +276,7 @@ regex = "^api_key_[A-Za-z0-9]{40}$"
     #[test]
     fn test_multiple_patterns_first_match() {
         let config = PatternConfig::with_patterns(vec![
-            "^[0-9]+$".to_string(),  // Matches any number
+            "^[0-9]+$".to_string(),   // Matches any number
             "^[0-9]{6}$".to_string(), // Matches 6-digit number
         ]);
 

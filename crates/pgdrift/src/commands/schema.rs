@@ -4,6 +4,7 @@ use pgdrift_core::filter::PathFilter;
 use pgdrift_core::pattern::PatternConfig;
 use pgdrift_core::schema::{JsonSchema, SchemaConfig, SchemaGenerator};
 use pgdrift_db::{ConnectionPool, Sampler};
+use std::str::FromStr;
 
 /// Schema output format
 #[derive(Debug, Clone)]
@@ -12,17 +13,63 @@ pub enum SchemaFormat {
     PgJsonSchema,
 }
 
-impl SchemaFormat {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SchemaFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "json-schema" | "json" => Ok(Self::JsonSchema),
             "pg-jsonschema" | "pg" | "sql" => Ok(Self::PgJsonSchema),
-            _ => anyhow::bail!("Invalid schema format: {}. Use 'json-schema' or 'pg-jsonschema'", s),
+            _ => anyhow::bail!(
+                "Invalid schema format: {}. Use 'json-schema' or 'pg-jsonschema'",
+                s
+            ),
+        }
+    }
+}
+
+/// Configuration for schema generation command
+pub struct SchemaCommandConfig {
+    pub database_url: String,
+    pub table: String,
+    pub column: String,
+    pub sample_size: usize,
+    pub format: SchemaFormat,
+    pub required_threshold: f64,
+    pub strict: bool,
+    pub filter: PathFilter,
+    pub pattern_config: PatternConfig,
+}
+
+impl SchemaCommandConfig {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        database_url: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        sample_size: usize,
+        format: SchemaFormat,
+        required_threshold: f64,
+        strict: bool,
+        filter: PathFilter,
+        pattern_config: PatternConfig,
+    ) -> Self {
+        Self {
+            database_url: database_url.into(),
+            table: table.into(),
+            column: column.into(),
+            sample_size,
+            format,
+            required_threshold,
+            strict,
+            filter,
+            pattern_config,
         }
     }
 }
 
 /// Run JSON schema generation for a JSONB column
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     database_url: &str,
     table: &str,
@@ -34,6 +81,31 @@ pub async fn run(
     filter: PathFilter,
     pattern_config: PatternConfig,
 ) -> Result<()> {
+    let config = SchemaCommandConfig::new(
+        database_url,
+        table,
+        column,
+        sample_size,
+        format,
+        required_threshold,
+        strict,
+        filter,
+        pattern_config,
+    );
+    run_impl(config).await
+}
+
+/// Internal implementation that takes config struct
+async fn run_impl(config: SchemaCommandConfig) -> Result<()> {
+    let database_url = &config.database_url;
+    let table = &config.table;
+    let column = &config.column;
+    let sample_size = config.sample_size;
+    let format = config.format;
+    let required_threshold = config.required_threshold;
+    let strict = config.strict;
+    let filter = config.filter;
+    let pattern_config = config.pattern_config;
     let (schema_name, table_name) = parse_table_name(table);
 
     // Show filter info if patterns are active
@@ -109,7 +181,14 @@ pub async fn run(
     );
     println!("Required fields: {}", json_schema.required.len());
 
-    print_schema_result(&json_schema, &format, &schema_name, &table_name, column, &generator);
+    print_schema_result(
+        &json_schema,
+        &format,
+        &schema_name,
+        &table_name,
+        column,
+        &generator,
+    );
 
     Ok(())
 }

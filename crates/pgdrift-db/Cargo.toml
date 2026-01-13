@@ -17,5 +17,6 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 indicatif = { workspace = true }  # Progress bars
 futures = "0.3"  # For stream processing
+async-stream = "0.3"  # For stream! macro
 testcontainers = "0.26"  # For test utilities
 serde = { version = "1.0", features = ["derive"] }

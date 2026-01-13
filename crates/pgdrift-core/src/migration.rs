@@ -82,12 +82,12 @@ impl PostgresType {
     /// Infer string-based PostgreSQL type
     fn infer_string_type(stats: &FieldStats) -> Option<Self> {
         // Check max length
-        if let Some(max_len) = stats.max_string_length {
-            if max_len <= 255 {
-                return Some(PostgresType::Varchar {
-                    length: max_len.max(1) as u32,
-                });
-            }
+        if let Some(max_len) = stats.max_string_length
+            && max_len <= 255
+        {
+            return Some(PostgresType::Varchar {
+                length: max_len.max(1) as u32,
+            });
         }
 
         // Default to TEXT for longer strings or unknown length
@@ -189,11 +189,7 @@ impl MigrationCandidate {
     }
 
     /// Generate SQL fragments for this migration candidate
-    pub fn new(
-        stats: &FieldStats,
-        jsonb_column: &str,
-        config: &MigrationConfig,
-    ) -> Option<Self> {
+    pub fn new(stats: &FieldStats, jsonb_column: &str, config: &MigrationConfig) -> Option<Self> {
         // Check if field is scalar (not Array or Object)
         let dominant_type = stats
             .types
@@ -262,8 +258,7 @@ impl MigrationCandidate {
                 },
                 message: format!(
                     "Type inconsistency: {:.1}% of values are not {}",
-                    minority_percentage,
-                    dominant_type
+                    minority_percentage, dominant_type
                 ),
                 examples: stats
                     .examples
@@ -290,7 +285,7 @@ impl MigrationCandidate {
         }
 
         Some(Self {
-            field_path: stats.path.clone(),
+            field_path: stats.path.to_string(),
             source_type: dominant_type,
             target_type,
             density: stats.density,
@@ -343,7 +338,10 @@ pub fn generate_migration_sql(
     // Summary
     let warning_count = candidates.iter().filter(|c| !c.warnings.is_empty()).count();
     sql.push_str("-- Summary:\n");
-    sql.push_str(&format!("--   - {} fields eligible for migration\n", candidates.len()));
+    sql.push_str(&format!(
+        "--   - {} fields eligible for migration\n",
+        candidates.len()
+    ));
     sql.push_str(&format!("--   - {} fields with warnings\n", warning_count));
     sql.push_str("--\n\n");
 
@@ -354,7 +352,11 @@ pub fn generate_migration_sql(
 
     // Step 1: Add columns
     sql.push_str("-- Step 1: Add new native columns\n");
-    sql.push_str(&format!("ALTER TABLE {}.{}\n", quote_identifier(schema), quote_identifier(table)));
+    sql.push_str(&format!(
+        "ALTER TABLE {}.{}\n",
+        quote_identifier(schema),
+        quote_identifier(table)
+    ));
     for (i, candidate) in candidates.iter().enumerate() {
         if i > 0 {
             sql.push_str(",\n");
@@ -365,7 +367,11 @@ pub fn generate_migration_sql(
 
     // Step 2: Backfill data
     sql.push_str("-- Step 2: Backfill data from JSONB\n");
-    sql.push_str(&format!("UPDATE {}.{} SET\n", quote_identifier(schema), quote_identifier(table)));
+    sql.push_str(&format!(
+        "UPDATE {}.{} SET\n",
+        quote_identifier(schema),
+        quote_identifier(table)
+    ));
     for (i, candidate) in candidates.iter().enumerate() {
         if i > 0 {
             sql.push_str(",\n");
@@ -382,7 +388,11 @@ pub fn generate_migration_sql(
 
     if !constraints.is_empty() {
         sql.push_str("-- Step 3: Add NOT NULL constraints (for high-density fields)\n");
-        sql.push_str(&format!("ALTER TABLE {}.{}\n", quote_identifier(schema), quote_identifier(table)));
+        sql.push_str(&format!(
+            "ALTER TABLE {}.{}\n",
+            quote_identifier(schema),
+            quote_identifier(table)
+        ));
         for (i, constraint) in constraints.iter().enumerate() {
             if i > 0 {
                 sql.push_str(",\n");
@@ -395,7 +405,10 @@ pub fn generate_migration_sql(
     // Warnings section
     for candidate in candidates {
         if !candidate.warnings.is_empty() {
-            sql.push_str(&format!("\n-- WARNING: Field '{}' has issues:\n", candidate.field_path));
+            sql.push_str(&format!(
+                "\n-- WARNING: Field '{}' has issues:\n",
+                candidate.field_path
+            ));
             for warning in &candidate.warnings {
                 sql.push_str(&format!("--   {}: {}\n", warning.severity, warning.message));
                 if !warning.examples.is_empty() {
@@ -406,7 +419,7 @@ pub fn generate_migration_sql(
                         }
                         sql.push_str(&format!("{}", example));
                     }
-                    sql.push_str("\n");
+                    sql.push('\n');
                 }
             }
         }
@@ -424,11 +437,15 @@ fn quote_identifier(identifier: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_postgres_type_display() {
         assert_eq!(PostgresType::Text.to_string(), "TEXT");
-        assert_eq!(PostgresType::Varchar { length: 50 }.to_string(), "VARCHAR(50)");
+        assert_eq!(
+            PostgresType::Varchar { length: 50 }.to_string(),
+            "VARCHAR(50)"
+        );
         assert_eq!(PostgresType::Integer.to_string(), "INTEGER");
         assert_eq!(PostgresType::BigInt.to_string(), "BIGINT");
         assert_eq!(
@@ -444,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_infer_boolean_type() {
-        let mut stats = FieldStats::new("is_active".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("is_active"), 0);
         stats.record(&json!(true));
         stats.record(&json!(false));
         stats.finalize(2);
@@ -455,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_infer_varchar_type() {
-        let mut stats = FieldStats::new("email".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("email"), 0);
         stats.record(&json!("test@example.com"));
         stats.record(&json!("user@domain.org"));
         stats.finalize(2);
@@ -467,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_infer_text_type_for_long_strings() {
-        let mut stats = FieldStats::new("description".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("description"), 0);
         let long_string = "a".repeat(300);
         stats.record(&json!(long_string));
         stats.finalize(1);
@@ -478,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_infer_integer_type() {
-        let mut stats = FieldStats::new("age".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("age"), 0);
         stats.record(&json!(25));
         stats.record(&json!(30));
         stats.record(&json!(45));
@@ -490,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_infer_bigint_type() {
-        let mut stats = FieldStats::new("large_id".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("large_id"), 0);
         stats.record(&json!(9_000_000_000_i64));
         stats.finalize(1);
 
@@ -500,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_infer_double_precision_type() {
-        let mut stats = FieldStats::new("price".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("price"), 0);
         stats.record(&json!(19.99));
         stats.record(&json!(29.50));
         stats.finalize(2);
@@ -534,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_migration_candidate_high_density() {
-        let mut stats = FieldStats::new("email".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             stats.record(&json!("test@example.com"));
         }
@@ -552,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_migration_candidate_low_density_excluded() {
-        let mut stats = FieldStats::new("optional_field".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("optional_field"), 0);
         for i in 0..100 {
             if i < 50 {
                 stats.record(&json!("value"));
@@ -569,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_migration_candidate_type_inconsistency_warning() {
-        let mut stats = FieldStats::new("age".to_string(), 0);
+        let mut stats = FieldStats::new(Arc::from("age"), 0);
         // 90 numbers, 10 strings
         for _ in 0..90 {
             stats.record(&json!(25));
@@ -585,8 +602,6 @@ mod tests {
         assert!(candidate.is_some());
         let candidate = candidate.unwrap();
         assert!(!candidate.warnings.is_empty());
-        assert!(candidate.warnings[0]
-            .message
-            .contains("Type inconsistency"));
+        assert!(candidate.warnings[0].message.contains("Type inconsistency"));
     }
 }

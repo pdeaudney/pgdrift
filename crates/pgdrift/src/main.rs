@@ -290,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
             let pattern_cfg = commands::load_pattern_config(pattern_regexes, pattern_config)?;
-            let schema_format = commands::schema::SchemaFormat::from_str(&format)?;
+            let schema_format = format.parse()?;
             commands::schema::run(
                 &database_url,
                 &table,

@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use pgdrift_core::analyzer::JsonAnalyzer;
 use pgdrift_core::filter::PathFilter;
 use pgdrift_core::migration::{
-    generate_migration_candidates, generate_migration_sql, MigrationCandidate, MigrationConfig,
+    MigrationCandidate, MigrationConfig, generate_migration_candidates, generate_migration_sql,
 };
 use pgdrift_db::{ConnectionPool, Sampler};
 use serde::Serialize;
@@ -18,7 +18,45 @@ pub struct MigrationResult {
     pub candidates: Vec<MigrationCandidate>,
 }
 
+/// Configuration for migration command
+pub struct MigrateCommandConfig {
+    pub database_url: String,
+    pub table: String,
+    pub column: String,
+    pub sample_size: usize,
+    pub format: OutputFormat,
+    pub min_density: f64,
+    pub min_type_consistency: f64,
+    pub filter: PathFilter,
+}
+
+impl MigrateCommandConfig {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        database_url: impl Into<String>,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        sample_size: usize,
+        format: OutputFormat,
+        min_density: f64,
+        min_type_consistency: f64,
+        filter: PathFilter,
+    ) -> Self {
+        Self {
+            database_url: database_url.into(),
+            table: table.into(),
+            column: column.into(),
+            sample_size,
+            format,
+            min_density,
+            min_type_consistency,
+            filter,
+        }
+    }
+}
+
 /// Run migration guide generation for a JSONB column
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     database_url: &str,
     table: &str,
@@ -29,6 +67,29 @@ pub async fn run(
     min_type_consistency: f64,
     filter: PathFilter,
 ) -> Result<()> {
+    let config = MigrateCommandConfig::new(
+        database_url,
+        table,
+        column,
+        sample_size,
+        format,
+        min_density,
+        min_type_consistency,
+        filter,
+    );
+    run_impl(config).await
+}
+
+/// Internal implementation that takes config struct
+async fn run_impl(config: MigrateCommandConfig) -> Result<()> {
+    let database_url = &config.database_url;
+    let table = &config.table;
+    let column = &config.column;
+    let sample_size = config.sample_size;
+    let format = config.format;
+    let min_density = config.min_density;
+    let min_type_consistency = config.min_type_consistency;
+    let filter = config.filter;
     let (schema, table) = parse_table_name(table);
 
     // Show filter info if patterns are active
@@ -123,12 +184,12 @@ fn print_migration_result(
     }
 
     // For table and markdown formats, also show the SQL at the end
-    if matches!(format, OutputFormat::Table | OutputFormat::Markdown) {
-        if !result.candidates.is_empty() {
-            println!("\n--- Generated Migration SQL ---\n");
-            let sql = generate_migration_sql(schema, table, column, &result.candidates);
-            println!("{}", sql);
-        }
+    if matches!(format, OutputFormat::Table | OutputFormat::Markdown)
+        && !result.candidates.is_empty()
+    {
+        println!("\n--- Generated Migration SQL ---\n");
+        let sql = generate_migration_sql(schema, table, column, &result.candidates);
+        println!("{}", sql);
     }
 }
 
@@ -168,7 +229,9 @@ fn print_migration_table(result: &MigrationResult) {
             let warnings_str = if candidate.warnings.is_empty() {
                 "✓".green().to_string()
             } else {
-                format!("{} issue(s)", candidate.warnings.len()).yellow().to_string()
+                format!("{} issue(s)", candidate.warnings.len())
+                    .yellow()
+                    .to_string()
             };
 
             let nullable_str = if candidate.nullable {
@@ -215,12 +278,22 @@ fn print_migration_table(result: &MigrationResult) {
 
 /// Print migration guide as Markdown
 fn print_migration_markdown(result: &MigrationResult) {
-    println!("# Migration Guide: {}.{}.{}\n", result.schema, result.table, result.column);
+    println!(
+        "# Migration Guide: {}.{}.{}\n",
+        result.schema, result.table, result.column
+    );
     println!("Generated: {}\n", chrono::Utc::now().format("%Y-%m-%d"));
 
     println!("## Summary\n");
-    println!("- **{} fields** eligible for migration", result.candidates.len());
-    let warning_count = result.candidates.iter().filter(|c| !c.warnings.is_empty()).count();
+    println!(
+        "- **{} fields** eligible for migration",
+        result.candidates.len()
+    );
+    let warning_count = result
+        .candidates
+        .iter()
+        .filter(|c| !c.warnings.is_empty())
+        .count();
     println!("- **{} fields** with warnings", warning_count);
     println!("- **{} samples** analyzed\n", result.total_samples);
 
@@ -231,8 +304,12 @@ fn print_migration_markdown(result: &MigrationResult) {
     }
 
     println!("## Recommended Migrations\n");
-    println!("| Field | Source Type | Target Type | Density | Type Consistency | Nullable | Warnings |");
-    println!("|-------|-------------|-------------|---------|------------------|----------|----------|");
+    println!(
+        "| Field | Source Type | Target Type | Density | Type Consistency | Nullable | Warnings |"
+    );
+    println!(
+        "|-------|-------------|-------------|---------|------------------|----------|----------|"
+    );
 
     for candidate in &result.candidates {
         let warnings_str = if candidate.warnings.is_empty() {
@@ -241,11 +318,7 @@ fn print_migration_markdown(result: &MigrationResult) {
             format!("⚠️ {}", candidate.warnings.len())
         };
 
-        let nullable_str = if candidate.nullable {
-            "Yes"
-        } else {
-            "No"
-        };
+        let nullable_str = if candidate.nullable { "Yes" } else { "No" };
 
         println!(
             "| {} | {} | {} | {:.1}% | {:.1}% | {} | {} |",

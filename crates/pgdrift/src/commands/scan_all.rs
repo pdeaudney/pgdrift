@@ -64,16 +64,16 @@ pub async fn run(
             col.schema, col.column, col.table
         );
 
-        match analyze_column(
-            conn.pool(),
-            &col.schema,
-            &col.table,
-            &col.column,
-            col.estimated_rows,
+        match analyze_column(AnalyzeColumnConfig {
+            pool: conn.pool(),
+            schema: &col.schema,
+            table: &col.table,
+            column: &col.column,
+            estimated_rows: col.estimated_rows,
             sample_size,
-            &config,
-            &filter,
-        )
+            config: &config,
+            filter: &filter,
+        })
         .await
         {
             Ok((samples_analyzed, drift_issues)) => {
@@ -137,16 +137,27 @@ pub async fn run(
     Ok(())
 }
 
-async fn analyze_column(
-    pool: &sqlx::PgPool,
-    schema: &str,
-    table: &str,
-    column: &str,
+/// Configuration for analyzing a single column
+struct AnalyzeColumnConfig<'a> {
+    pool: &'a sqlx::PgPool,
+    schema: &'a str,
+    table: &'a str,
+    column: &'a str,
     estimated_rows: Option<i64>,
     sample_size: usize,
-    config: &DriftConfig,
-    filter: &PathFilter,
-) -> Result<(usize, Vec<DriftIssue>)> {
+    config: &'a DriftConfig,
+    filter: &'a PathFilter,
+}
+
+async fn analyze_column(config: AnalyzeColumnConfig<'_>) -> Result<(usize, Vec<DriftIssue>)> {
+    let pool = config.pool;
+    let schema = config.schema;
+    let table = config.table;
+    let column = config.column;
+    let estimated_rows = config.estimated_rows;
+    let sample_size = config.sample_size;
+    let drift_config = config.config;
+    let filter = config.filter;
     // Use estimated_rows from discovery to avoid expensive COUNT(*) queries
     let sampler = Sampler::new(pool, schema, table, estimated_rows, sample_size)
         .await
@@ -159,7 +170,10 @@ async fn analyze_column(
         .with_context(|| {
             format!(
                 "Failed to sample data from {}.{}.{} using strategy: {}",
-                schema, table, column, sampler.strategy_info()
+                schema,
+                table,
+                column,
+                sampler.strategy_info()
             )
         })?;
 
@@ -172,7 +186,7 @@ async fn analyze_column(
         analyzer.analyze(sample);
     }
     let stats = analyzer.finalize();
-    let drift_issues = detect_drift(&stats, config);
+    let drift_issues = detect_drift(&stats, drift_config);
 
     Ok((samples.len(), drift_issues))
 }

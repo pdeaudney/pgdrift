@@ -1,7 +1,10 @@
+use async_stream::stream;
 use futures::TryStreamExt;
+use futures::stream::Stream;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::pin::Pin;
 
 /// Sampling strategy selection based on table size
 #[derive(Debug, Clone, PartialEq)]
@@ -59,9 +62,7 @@ impl SamplingStrategy {
                         // No numeric PK found (table may have UUID, text PK, or no PK)
                         // Fallback to Random sampling - more compatible than TABLESAMPLE
                         // TABLESAMPLE can fail on certain table types and PostgreSQL versions
-                        Self::Random {
-                            limit: sample_size,
-                        }
+                        Self::Random { limit: sample_size }
                     }
                 }
             }
@@ -178,13 +179,102 @@ impl Sampler {
         self
     }
 
-    //// Execute the sampling strat and return jsonb valuies
+    /// Execute the sampling strategy and return a stream of batches
+    ///
+    /// This method returns batches of samples (up to 1000 per batch) to enable
+    /// constant memory usage regardless of table size. Each batch is yielded
+    /// as a Vec<Value> and can be processed incrementally.
+    ///
+    /// # Performance
+    /// - Memory: Constant ~10-20MB per batch vs loading all samples
+    /// - Processing: Can start analyzing before all samples are fetched
+    /// - Scalability: Works with tables of any size (10M+ rows)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut stream = sampler.sample_stream(pool, schema, table, column);
+    /// while let Some(batch_result) = stream.next().await {
+    ///     let batch = batch_result?;
+    ///     analyzer.analyze_batch(&batch);
+    ///     // Batch is dropped here, memory freed
+    /// }
+    /// ```
+    pub fn sample_stream<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        schema: &'a str,
+        table: &'a str,
+        column: &'a str,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<Value>, sqlx::Error>> + Send + 'a>> {
+        const BATCH_SIZE: usize = 1000;
+
+        let query = self.strategy.build_query(schema, table, column);
+        let max_samples = self.strategy.max_samples();
+        let show_progress = self.show_progress;
+
+        Box::pin(stream! {
+            // Create progress bar if enabled
+            let progress = if show_progress {
+                let pb = ProgressBar::new(max_samples as u64);
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} samples")
+                        .expect("Invalid progress bar template")
+                        .progress_chars("█▓▒░"),
+                );
+                Some(pb)
+            } else {
+                None
+            };
+
+            let mut rows = sqlx::query_scalar::<_, Value>(&query).fetch(pool);
+            let mut batch = Vec::with_capacity(BATCH_SIZE);
+            let mut total_count = 0u64;
+
+            while let Some(value) = rows.try_next().await? {
+                batch.push(value);
+                total_count += 1;
+
+                if batch.len() >= BATCH_SIZE {
+                    if let Some(ref pb) = progress {
+                        pb.set_position(total_count);
+                    }
+
+                    // Yield the batch and create a new one
+                    yield Ok(std::mem::take(&mut batch));
+                    batch = Vec::with_capacity(BATCH_SIZE);
+                }
+            }
+
+            // Yield any remaining samples
+            if !batch.is_empty() {
+                if let Some(ref pb) = progress {
+                    pb.set_position(total_count);
+                }
+                yield Ok(batch);
+            }
+
+            if let Some(pb) = progress {
+                pb.finish_with_message(format!("Collected {} samples", total_count));
+            }
+        })
+    }
+
+    /// Execute the sampling strat and return jsonb values
+    ///
+    /// This method collects all samples into a Vec. For large datasets (>100k samples),
+    /// consider using `sample_stream()` instead for constant memory usage.
     ///
     /// # Production safety
     /// In prod mode:
     /// - Max 1% sampling for large tables
     /// - Requires explicit confirmation (future work)
     /// - shows estimated query
+    ///
+    /// # Backward Compatibility
+    /// This method wraps `sample_stream()` to maintain API compatibility.
+    /// It's suitable for small to medium datasets but may consume significant
+    /// memory for very large tables.
     pub async fn sample(
         &self,
         pool: &PgPool,
@@ -192,41 +282,17 @@ impl Sampler {
         table: &str,
         column: &str,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        let query = self.strategy.build_query(schema, table, column);
-        let max_samples = self.strategy.max_samples();
+        use futures::StreamExt;
 
-        // Create progress bar if enabled
-        let progress = if self.show_progress {
-            let pb = ProgressBar::new(max_samples as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} samples")
-                    .expect("Invalid progress bar template")
-                    .progress_chars("█▓▒░"),
-            );
-            Some(pb)
-        } else {
-            None
-        };
+        let mut all_samples = Vec::new();
+        let mut stream = self.sample_stream(pool, schema, table, column);
 
-        // Execute query and collect results
-        let mut samples = Vec::new();
-        let mut rows = sqlx::query_scalar::<_, Value>(&query).fetch(pool);
-
-        // Use sqlx's streaming to handle large result sets
-        while let Some(value) = rows.try_next().await? {
-            samples.push(value);
-
-            if let Some(ref pb) = progress {
-                pb.set_position(samples.len() as u64);
-            }
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            all_samples.extend(batch);
         }
 
-        if let Some(pb) = progress {
-            pb.finish_with_message(format!("Collected {} samples", samples.len()));
-        }
-
-        Ok(samples)
+        Ok(all_samples)
     }
     /// Get information about the sampling strategy
     pub fn strategy_info(&self) -> String {

@@ -2,6 +2,7 @@ use crate::stats::FieldStats;
 use crate::types::JsonType;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Severity level for drift issues
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -236,7 +237,10 @@ impl Default for DriftConfig {
 }
 
 /// Analyze field statistics and detect drift
-pub fn detect_drift(stats: &HashMap<String, FieldStats>, config: &DriftConfig) -> Vec<DriftIssue> {
+pub fn detect_drift(
+    stats: &HashMap<Arc<str>, FieldStats>,
+    config: &DriftConfig,
+) -> Vec<DriftIssue> {
     let mut issues = Vec::new();
     for field_stats in stats.values() {
         if let Some(issue) = detect_type_inconsistency(field_stats, config) {
@@ -301,7 +305,7 @@ fn detect_type_inconsistency(stats: &FieldStats, config: &DriftConfig) -> Option
     // Only report if minority exceeds threshold
     if minority_percentage >= config.type_inconsistency_threshold {
         Some(DriftIssue::TypeInconsistency {
-            path: stats.path.clone(),
+            path: stats.path.to_string(),
             types: type_distributions,
             minority_percentage,
         })
@@ -314,7 +318,7 @@ fn detect_type_inconsistency(stats: &FieldStats, config: &DriftConfig) -> Option
 fn detect_ghost_key(stats: &FieldStats, config: &DriftConfig) -> Option<DriftIssue> {
     if stats.density <= config.ghost_key_threshold && stats.density > 0.0 {
         Some(DriftIssue::GhostKey {
-            path: stats.path.clone(),
+            path: stats.path.to_string(),
             density: stats.density,
             occurunces: stats.occurrences,
             total_samples: stats.total_samples,
@@ -330,7 +334,7 @@ fn detect_sparse_field(stats: &FieldStats, config: &DriftConfig) -> Option<Drift
     if stats.density > config.ghost_key_threshold && stats.density <= config.sparse_field_threshold
     {
         Some(DriftIssue::SparseField {
-            path: stats.path.clone(),
+            path: stats.path.to_string(),
             density: stats.density,
             occurrences: stats.occurrences,
             total_samples: stats.total_samples,
@@ -347,7 +351,7 @@ fn detect_missing_key(stats: &FieldStats, config: &DriftConfig) -> Option<DriftI
     {
         let expected_occurrences = stats.total_samples;
         Some(DriftIssue::MissingKey {
-            path: stats.path.clone(),
+            path: stats.path.to_string(),
             density: stats.density,
             expected_occurrences,
             actual_occurrences: stats.occurrences,
@@ -358,24 +362,25 @@ fn detect_missing_key(stats: &FieldStats, config: &DriftConfig) -> Option<DriftI
 }
 
 /// Detect schema evolution patterns
-fn detect_schema_evolution(stats: &HashMap<String, FieldStats>) -> Vec<DriftIssue> {
+fn detect_schema_evolution(stats: &HashMap<Arc<str>, FieldStats>) -> Vec<DriftIssue> {
     // TODO: probably need to rework this. Too many assumptions, maybe not even relevent
     let mut issues = Vec::new();
 
     // Check for version markers
     let version_markers = ["version", "schema_version", "v", "api_version"];
     for path in stats.keys() {
-        let path_segments: Vec<&str> = path.split('.').collect();
+        let path_str: &str = path;
+        let path_segments: Vec<&str> = path_str.split('.').collect();
         for marker in &version_markers {
             // Check if any path segment exactly matches the version marker
             if path_segments
                 .iter()
-                .any(|seg| seg.to_lowercase() == *marker)
+                .any(|&seg: &&str| seg.to_lowercase() == *marker)
             {
                 issues.push(DriftIssue::SchemaEvolution {
-                    path: path.clone(),
+                    path: path_str.to_string(),
                     pattern: EvolutionPattern::VersionMarker {
-                        marker_path: path.clone(),
+                        marker_path: path_str.to_string(),
                     },
                 });
                 break;
@@ -386,15 +391,16 @@ fn detect_schema_evolution(stats: &HashMap<String, FieldStats>) -> Vec<DriftIssu
     // Check for deprecated/legacy naming
     let deprecated_prefixes = ["old_", "legacy_", "deprecated_"];
     for path in stats.keys() {
+        let path_str: &str = path;
         for prefix in &deprecated_prefixes {
-            if path.to_lowercase().starts_with(prefix) {
+            if path_str.to_lowercase().starts_with(prefix) {
                 // Try to find the new field (without prefix)
-                let potential_new = path.replacen(prefix, "", 1);
-                if stats.contains_key(&potential_new) {
+                let potential_new = path_str.replacen(prefix, "", 1);
+                if stats.contains_key(potential_new.as_str()) {
                     issues.push(DriftIssue::SchemaEvolution {
-                        path: path.clone(),
+                        path: path_str.to_string(),
                         pattern: EvolutionPattern::DeprecatedNaming {
-                            old_path: path.clone(),
+                            old_path: path_str.to_string(),
                             new_path: potential_new,
                         },
                     });
@@ -409,12 +415,14 @@ fn detect_schema_evolution(stats: &HashMap<String, FieldStats>) -> Vec<DriftIssu
     // Making a lot of assuptions at this point
     let mut path_families: HashMap<String, Vec<String>> = HashMap::new();
     for path in stats.keys() {
+        let path_str: &str = path;
         // Group by base path (e.g., "user.address" for "user.address_v1" and "user.address_v2")
-        if let Some(base) = path.rsplit_once('_').map(|(base, _)| base) {
+        if let Some(parts) = path_str.rsplit_once('_') {
+            let (base, _): (&str, &str) = parts;
             path_families
                 .entry(base.to_string())
                 .or_default()
-                .push(path.clone());
+                .push(path_str.to_string());
         }
     }
 
@@ -423,7 +431,7 @@ fn detect_schema_evolution(stats: &HashMap<String, FieldStats>) -> Vec<DriftIssu
             // Check if they're mutually exclusive (sum of densities ~= max individual density)
             let densities: Vec<f64> = paths
                 .iter()
-                .filter_map(|p| stats.get(p).map(|s| s.density))
+                .filter_map(|p| stats.get(p.as_str()).map(|s| s.density))
                 .collect();
             if densities.len() >= 2 {
                 let sum: f64 = densities.iter().sum();
@@ -445,6 +453,7 @@ fn detect_schema_evolution(stats: &HashMap<String, FieldStats>) -> Vec<DriftIssu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn create_field_stats(
         path: &str,
@@ -452,7 +461,7 @@ mod tests {
         total_samples: u64,
         types: Vec<(JsonType, u64)>,
     ) -> FieldStats {
-        let mut stats = FieldStats::new(path.to_string(), 1);
+        let mut stats = FieldStats::new(Arc::from(path), 1);
         stats.occurrences = occurrences;
         stats.total_samples = total_samples;
         stats.density = occurrences as f64 / total_samples as f64;
@@ -611,7 +620,7 @@ mod tests {
     fn test_schema_evolution_version_marker() {
         let mut stats = HashMap::new();
         stats.insert(
-            "schema_version".to_string(),
+            Arc::from("schema_version"),
             create_field_stats("schema_version", 1000, 1000, vec![(JsonType::Number, 1000)]),
         );
 
@@ -630,11 +639,11 @@ mod tests {
     fn test_schema_evolution_deprecated_naming() {
         let mut stats = HashMap::new();
         stats.insert(
-            "legacy_address".to_string(),
+            Arc::from("legacy_address"),
             create_field_stats("legacy_address", 100, 1000, vec![(JsonType::String, 100)]),
         );
         stats.insert(
-            "address".to_string(),
+            Arc::from("address"),
             create_field_stats("address", 900, 1000, vec![(JsonType::String, 900)]),
         );
 
@@ -659,7 +668,7 @@ mod tests {
 
         // Type inconsistency
         stats.insert(
-            "user.age".to_string(),
+            Arc::from("user.age"),
             create_field_stats(
                 "user.age",
                 100,
@@ -670,19 +679,19 @@ mod tests {
 
         // Ghost key
         stats.insert(
-            "billing.legacy_plan".to_string(),
+            Arc::from("billing.legacy_plan"),
             create_field_stats("billing.legacy_plan", 5, 1000, vec![(JsonType::String, 5)]),
         );
 
         // Missing key
         stats.insert(
-            "user.email".to_string(),
+            Arc::from("user.email"),
             create_field_stats("user.email", 850, 1000, vec![(JsonType::String, 850)]),
         );
 
         // Version marker
         stats.insert(
-            "version".to_string(),
+            Arc::from("version"),
             create_field_stats("version", 1000, 1000, vec![(JsonType::Number, 1000)]),
         );
 

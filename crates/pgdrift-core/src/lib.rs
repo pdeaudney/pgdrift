@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod drift;
 pub mod filter;
 pub mod index;
+pub mod interner;
 pub mod migration;
 pub mod pattern;
 pub mod schema;

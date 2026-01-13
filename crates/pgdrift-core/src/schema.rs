@@ -2,7 +2,7 @@ use crate::pattern::PatternConfig;
 use crate::stats::FieldStats;
 use crate::types::JsonType;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// Configuration for schema generation
@@ -99,7 +99,10 @@ pub struct PropertySchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<HashMap<String, PropertySchema>>,
 
-    #[serde(rename = "additionalProperties", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "additionalProperties",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub additional_properties: Option<bool>,
 
     // For arrays
@@ -139,7 +142,7 @@ impl PropertySchema {
                     .iter()
                     .map(|s| Value::String(s.clone()))
                     .collect();
-                values.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                values.sort_by_key(|a| a.to_string());
                 Some(values)
             } else {
                 None
@@ -275,7 +278,8 @@ impl SchemaGenerator {
         let (pattern_properties, excluded_keys) = self.detect_pattern_properties(stats, "");
 
         // Build nested property tree (excluding keys that match patterns)
-        let (mut root_properties, required_fields) = self.build_property_tree(stats, &excluded_keys);
+        let (mut root_properties, required_fields) =
+            self.build_property_tree(stats, &excluded_keys);
 
         // Apply pattern detection recursively to nested objects
         self.apply_nested_pattern_detection(&mut root_properties, stats);
@@ -308,7 +312,7 @@ impl SchemaGenerator {
         total_samples: u64,
     ) -> JsonSchema {
         // Find the root array stats (path "[]")
-        let root_array_stat = stats.iter().find(|s| s.path == "[]");
+        let root_array_stat = stats.iter().find(|s| s.path.as_ref() == "[]");
 
         // Determine the array items type
         let items_schema = if let Some(root_stat) = root_array_stat {
@@ -403,10 +407,10 @@ impl SchemaGenerator {
                 key_groups.entry(key.clone()).or_default().push(stat);
 
                 // Track density - use the stat's density if it's the key itself
-                if path_prefix.is_empty() && stat.path == key {
-                    key_densities.insert(key.clone(), stat.density);
-                } else if !path_prefix.is_empty()
-                    && stat.path == format!("{}.{}", path_prefix, key) {
+                if (path_prefix.is_empty() && stat.path.as_ref() == key)
+                    || (!path_prefix.is_empty()
+                        && stat.path.as_ref() == format!("{}.{}", path_prefix, key).as_str())
+                {
                     key_densities.insert(key.clone(), stat.density);
                 }
             }
@@ -423,13 +427,11 @@ impl SchemaGenerator {
                 .map(|d| *d <= self.config.ghost_key_threshold)
                 .unwrap_or(false);
 
-            if is_ghost_key {
-                if let Some(pattern) = KeyPattern::detect(&key, &self.pattern_config) {
-                    pattern_groups
-                        .entry(pattern)
-                        .or_default()
-                        .push((key, stats_list));
-                }
+            if is_ghost_key && let Some(pattern) = KeyPattern::detect(&key, &self.pattern_config) {
+                pattern_groups
+                    .entry(pattern)
+                    .or_default()
+                    .push((key, stats_list));
             }
         }
 
@@ -443,7 +445,8 @@ impl SchemaGenerator {
                 let regex = pattern.to_regex();
 
                 // Build the value schema from all nested paths
-                let value_schema = self.build_pattern_value_schema(stats, path_prefix, &key_stats_list);
+                let value_schema =
+                    self.build_pattern_value_schema(stats, path_prefix, &key_stats_list);
 
                 pattern_properties.insert(regex, value_schema);
 
@@ -465,30 +468,26 @@ impl SchemaGenerator {
     ) {
         for (prop_name, prop_schema) in properties.iter_mut() {
             // Only process object types with child properties
-            if let Some(PropertyType::Single(ref type_name)) = prop_schema.property_type {
-                if type_name == "object" {
-                    if let Some(ref mut child_props) = prop_schema.properties {
-                        // Check if child properties should use pattern properties
-                        let (pattern_props, excluded) = self.detect_nested_patterns(
-                            child_props,
-                            all_stats,
-                            prop_name,
-                        );
+            if let Some(PropertyType::Single(ref type_name)) = prop_schema.property_type
+                && type_name == "object"
+                && let Some(ref mut child_props) = prop_schema.properties
+            {
+                // Check if child properties should use pattern properties
+                let (pattern_props, excluded) =
+                    self.detect_nested_patterns(child_props, all_stats, prop_name);
 
-                        if !pattern_props.is_empty() {
-                            // Remove excluded properties
-                            for key in &excluded {
-                                child_props.remove(key);
-                            }
-
-                            // Add pattern properties to this nested object
-                            prop_schema.pattern_properties = Some(pattern_props);
-                        }
-
-                        // Recurse into child properties
-                        self.apply_nested_pattern_detection(child_props, all_stats);
+                if !pattern_props.is_empty() {
+                    // Remove excluded properties
+                    for key in &excluded {
+                        child_props.remove(key);
                     }
+
+                    // Add pattern properties to this nested object
+                    prop_schema.pattern_properties = Some(pattern_props);
                 }
+
+                // Recurse into child properties
+                self.apply_nested_pattern_detection(child_props, all_stats);
             }
         }
     }
@@ -504,21 +503,24 @@ impl SchemaGenerator {
         let mut key_densities: HashMap<String, f64> = HashMap::new();
 
         // Collect densities for each child key
-        for (child_key, _child_schema) in child_properties {
+        for child_key in child_properties.keys() {
             let full_path = format!("{}.{}", parent_path, child_key);
 
             // Find the stat for this path
-            if let Some(stat) = all_stats.iter().find(|s| s.path == full_path) {
+            if let Some(stat) = all_stats
+                .iter()
+                .find(|s| s.path.as_ref() == full_path.as_str())
+            {
                 key_densities.insert(child_key.clone(), stat.density);
 
                 // Check if this is a ghost key and matches a pattern
-                if stat.density <= self.config.ghost_key_threshold {
-                    if let Some(pattern) = KeyPattern::detect(child_key, &self.pattern_config) {
-                        pattern_groups
-                            .entry(pattern)
-                            .or_default()
-                            .push(child_key.clone());
-                    }
+                if stat.density <= self.config.ghost_key_threshold
+                    && let Some(pattern) = KeyPattern::detect(child_key, &self.pattern_config)
+                {
+                    pattern_groups
+                        .entry(pattern)
+                        .or_default()
+                        .push(child_key.clone());
                 }
             }
         }
@@ -540,11 +542,8 @@ impl SchemaGenerator {
                     })
                     .collect();
 
-                let merged_schema = self.build_pattern_value_schema(
-                    all_stats,
-                    parent_path,
-                    &key_stats_list,
-                );
+                let merged_schema =
+                    self.build_pattern_value_schema(all_stats, parent_path, &key_stats_list);
 
                 pattern_properties.insert(regex, merged_schema);
 
@@ -588,10 +587,10 @@ impl SchemaGenerator {
                             let prop_schema = PropertySchema::from_field_stats(stat, &self.config);
                             nested_properties.insert(field_name.to_string(), prop_schema);
 
-                            if stat.density >= self.config.required_threshold {
-                                if !nested_required.contains(&field_name.to_string()) {
-                                    nested_required.push(field_name.to_string());
-                                }
+                            if stat.density >= self.config.required_threshold
+                                && !nested_required.contains(&field_name.to_string())
+                            {
+                                nested_required.push(field_name.to_string());
                             }
                         }
                     }
@@ -623,10 +622,7 @@ impl SchemaGenerator {
     /// Build items schema for root-level array from nested field paths
     fn build_array_items_schema(&self, stats: &[FieldStats]) -> Option<Box<PropertySchema>> {
         // Filter for paths that start with "[]." (nested in root array)
-        let nested_stats: Vec<_> = stats
-            .iter()
-            .filter(|s| s.path.starts_with("[]."))
-            .collect();
+        let nested_stats: Vec<_> = stats.iter().filter(|s| s.path.starts_with("[].")).collect();
 
         if nested_stats.is_empty() {
             // No nested fields, might be array of primitives
@@ -731,7 +727,7 @@ impl SchemaGenerator {
                         properties: None,
                         additional_properties: None,
                         items: None,
-            pattern_properties: None,
+                        pattern_properties: None,
                     });
             } else {
                 // Nested field - build nested structure
@@ -750,9 +746,11 @@ impl SchemaGenerator {
                                 maximum: None,
                                 pattern: None,
                                 properties: Some(HashMap::new()),
-                                additional_properties: Some(!self.config.strict_additional_properties),
+                                additional_properties: Some(
+                                    !self.config.strict_additional_properties,
+                                ),
                                 items: None,
-            pattern_properties: None,
+                                pattern_properties: None,
                             };
 
                             PropertySchema {
@@ -766,7 +764,7 @@ impl SchemaGenerator {
                                 properties: None,
                                 additional_properties: None,
                                 items: Some(Box::new(items_schema)),
-            pattern_properties: None,
+                                pattern_properties: None,
                             }
                         });
 
@@ -789,7 +787,7 @@ impl SchemaGenerator {
                             properties: Some(HashMap::new()),
                             additional_properties: Some(!self.config.strict_additional_properties),
                             items: None,
-            pattern_properties: None,
+                            pattern_properties: None,
                         });
 
                     // Build nested path
@@ -807,9 +805,9 @@ impl SchemaGenerator {
 
     /// Parse a field name and detect if it's an array (ends with [])
     /// Returns (field_name, is_array)
-    fn parse_field_name<'a>(&self, field: &'a str) -> (String, bool) {
-        if field.ends_with("[]") {
-            (field[..field.len() - 2].to_string(), true)
+    fn parse_field_name(&self, field: &str) -> (String, bool) {
+        if let Some(stripped) = field.strip_suffix("[]") {
+            (stripped.to_string(), true)
         } else {
             (field.to_string(), false)
         }
@@ -851,25 +849,53 @@ impl SchemaGenerator {
                     properties: None,
                     additional_properties: None,
                     items: None,
-            pattern_properties: None,
+                    pattern_properties: None,
                 });
         } else {
             // Intermediate node
             if is_array {
                 // Intermediate array node (e.g., path "user.items[].name")
-                let nested_prop = properties
-                    .entry(field_name.clone())
-                    .or_insert_with(|| PropertySchema {
-                        property_type: Some(PropertyType::Single("array".to_string())),
-                        description: None,
-                        format: None,
-                        enum_values: None,
-                        minimum: None,
-                        maximum: None,
-                        pattern: None,
-                        properties: None,
-                        additional_properties: None,
-                        items: Some(Box::new(PropertySchema {
+                let nested_prop =
+                    properties
+                        .entry(field_name.clone())
+                        .or_insert_with(|| PropertySchema {
+                            property_type: Some(PropertyType::Single("array".to_string())),
+                            description: None,
+                            format: None,
+                            enum_values: None,
+                            minimum: None,
+                            maximum: None,
+                            pattern: None,
+                            properties: None,
+                            additional_properties: None,
+                            items: Some(Box::new(PropertySchema {
+                                property_type: Some(PropertyType::Single("object".to_string())),
+                                description: None,
+                                format: None,
+                                enum_values: None,
+                                minimum: None,
+                                maximum: None,
+                                pattern: None,
+                                properties: Some(HashMap::new()),
+                                additional_properties: Some(
+                                    !self.config.strict_additional_properties,
+                                ),
+                                items: None,
+                                pattern_properties: None,
+                            })),
+                            pattern_properties: None,
+                        });
+
+                // Recurse into the items
+                if let Some(ref mut items_box) = nested_prop.items {
+                    self.insert_nested_property(items_box, &path_parts[1..], stat);
+                }
+            } else {
+                // Intermediate object node
+                let nested_prop =
+                    properties
+                        .entry(field_name.clone())
+                        .or_insert_with(|| PropertySchema {
                             property_type: Some(PropertyType::Single("object".to_string())),
                             description: None,
                             format: None,
@@ -881,31 +907,7 @@ impl SchemaGenerator {
                             additional_properties: Some(!self.config.strict_additional_properties),
                             items: None,
                             pattern_properties: None,
-                        })),
-                        pattern_properties: None,
-                    });
-
-                // Recurse into the items
-                if let Some(ref mut items_box) = nested_prop.items {
-                    self.insert_nested_property(items_box, &path_parts[1..], stat);
-                }
-            } else {
-                // Intermediate object node
-                let nested_prop = properties
-                    .entry(field_name.clone())
-                    .or_insert_with(|| PropertySchema {
-                        property_type: Some(PropertyType::Single("object".to_string())),
-                        description: None,
-                        format: None,
-                        enum_values: None,
-                        minimum: None,
-                        maximum: None,
-                        pattern: None,
-                        properties: Some(HashMap::new()),
-                        additional_properties: Some(!self.config.strict_additional_properties),
-                        items: None,
-            pattern_properties: None,
-                    });
+                        });
 
                 // Recurse
                 self.insert_nested_property(nested_prop, &path_parts[1..], stat);
@@ -940,10 +942,16 @@ impl SchemaGenerator {
             quote_identifier(db_schema),
             quote_identifier(table)
         ));
-        sql.push_str(&format!("  ADD CONSTRAINT {}\n", quote_identifier(&constraint_name)));
+        sql.push_str(&format!(
+            "  ADD CONSTRAINT {}\n",
+            quote_identifier(&constraint_name)
+        ));
         sql.push_str("  CHECK (\n");
         sql.push_str("    json_matches_schema(\n");
-        sql.push_str(&format!("      '{}'::json,\n", schema_json.replace('\'', "''")));
+        sql.push_str(&format!(
+            "      '{}'::json,\n",
+            schema_json.replace('\'', "''")
+        ));
         sql.push_str(&format!("      {}\n", quote_identifier(column)));
         sql.push_str("    )\n");
         sql.push_str("  );\n\n");
@@ -985,7 +993,10 @@ fn detect_string_format(field_path: &str, examples: &[Value]) -> Option<String> 
     });
 
     // Detect date-time format from field name or examples
-    if (lower_path.contains("date") || lower_path.contains("time") || lower_path.contains("timestamp") || lower_path.ends_with("_at"))
+    if (lower_path.contains("date")
+        || lower_path.contains("time")
+        || lower_path.contains("timestamp")
+        || lower_path.ends_with("_at"))
         && has_datetime_examples
     {
         return Some("date-time".to_string());
@@ -1026,7 +1037,7 @@ fn is_uuid_format(s: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyPattern {
     Uuid,
-    HexString16, // 16-character hex strings (device IDs, session tokens, etc.)
+    HexString16,    // 16-character hex strings (device IDs, session tokens, etc.)
     Custom(String), // Custom regex pattern
 }
 
@@ -1036,7 +1047,8 @@ impl KeyPattern {
         match self {
             KeyPattern::Uuid => {
                 // UUID pattern (case-insensitive)
-                "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$".to_string()
+                "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                    .to_string()
             }
             KeyPattern::HexString16 => {
                 // 16-character hex string (device IDs, session tokens)
@@ -1081,7 +1093,7 @@ fn quote_identifier(identifier: &str) -> String {
 
 impl JsonType {
     /// Convert to JSON Schema type name
-    fn to_json_schema_type(&self) -> String {
+    fn to_json_schema_type(self) -> String {
         match self {
             JsonType::Null => "null".to_string(),
             JsonType::Boolean => "boolean".to_string(),
@@ -1097,6 +1109,7 @@ impl JsonType {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_detect_email_format() {
@@ -1185,7 +1198,7 @@ mod tests {
         let mut stats = vec![];
 
         // Email field - 100% density
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("test@example.com"));
         }
@@ -1193,14 +1206,15 @@ mod tests {
         stats.push(email_stats);
 
         // Age field - 80% density
-        let mut age_stats = FieldStats::new("age".to_string(), 0);
+        let mut age_stats = FieldStats::new(Arc::from("age"), 0);
         for _ in 0..80 {
             age_stats.record(&json!(25));
         }
         age_stats.finalize(100);
         stats.push(age_stats);
 
-        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
+        let schema =
+            generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
 
         assert_eq!(schema.schema_type, "object");
         assert_eq!(schema.properties.len(), 2);
@@ -1216,16 +1230,18 @@ mod tests {
 
     #[test]
     fn test_schema_enum_detection() {
-        let mut config = SchemaConfig::default();
-        config.enum_max_values = 3;
-        config.enum_min_density = 0.8;
+        let config = SchemaConfig {
+            enum_max_values: 3,
+            enum_min_density: 0.8,
+            ..Default::default()
+        };
 
         let generator = SchemaGenerator::new(config);
 
         let mut stats = vec![];
 
         // Role field with 3 distinct values
-        let mut role_stats = FieldStats::new("role".to_string(), 0);
+        let mut role_stats = FieldStats::new(Arc::from("role"), 0);
         for _ in 0..30 {
             role_stats.record(&json!("admin"));
         }
@@ -1262,7 +1278,10 @@ mod tests {
 
         let json_val = schema.to_json();
         assert!(json_val.is_object());
-        assert_eq!(json_val["$schema"], "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(
+            json_val["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
         assert_eq!(json_val["type"], "object");
     }
 
@@ -1299,9 +1318,7 @@ mod tests {
         // If it fails, we get a single ValidationError
         match compiled.validate(&schema_json) {
             Ok(_) => Ok(()),
-            Err(error) => {
-                Err(format!("Schema validation failed: {}", error))
-            }
+            Err(error) => Err(format!("Schema validation failed: {}", error)),
         }
     }
 
@@ -1327,20 +1344,24 @@ mod tests {
         let mut stats = vec![];
 
         // Email field
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("test@example.com"));
         }
         email_stats.finalize(100);
         stats.push(email_stats);
 
-        let schema = generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
+        let schema =
+            generator.generate_json_schema(&stats, Some("Test Schema".to_string()), 100, false);
 
         // Validate the schema
         validate_json_schema(&schema).expect("Basic schema should be valid JSON Schema 2020-12");
 
         // Verify structure
-        assert_eq!(schema.schema_version, "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(
+            schema.schema_version,
+            "https://json-schema.org/draft/2020-12/schema"
+        );
         assert_eq!(schema.schema_type, "object");
         assert!(schema.properties.contains_key("email"));
     }
@@ -1353,7 +1374,7 @@ mod tests {
         let mut stats = vec![];
 
         // String field
-        let mut string_stats = FieldStats::new("name".to_string(), 0);
+        let mut string_stats = FieldStats::new(Arc::from("name"), 0);
         for _ in 0..100 {
             string_stats.record(&json!("Alice"));
         }
@@ -1361,7 +1382,7 @@ mod tests {
         stats.push(string_stats);
 
         // Number field
-        let mut number_stats = FieldStats::new("age".to_string(), 0);
+        let mut number_stats = FieldStats::new(Arc::from("age"), 0);
         for _ in 0..100 {
             number_stats.record(&json!(25));
         }
@@ -1369,7 +1390,7 @@ mod tests {
         stats.push(number_stats);
 
         // Boolean field
-        let mut bool_stats = FieldStats::new("active".to_string(), 0);
+        let mut bool_stats = FieldStats::new(Arc::from("active"), 0);
         for _ in 0..100 {
             bool_stats.record(&json!(true));
         }
@@ -1395,7 +1416,7 @@ mod tests {
         let mut stats = vec![];
 
         // Enum field with low cardinality
-        let mut role_stats = FieldStats::new("role".to_string(), 0);
+        let mut role_stats = FieldStats::new(Arc::from("role"), 0);
         for _ in 0..50 {
             role_stats.record(&json!("admin"));
         }
@@ -1426,7 +1447,7 @@ mod tests {
         let mut stats = vec![];
 
         // Number field with min/max
-        let mut score_stats = FieldStats::new("score".to_string(), 0);
+        let mut score_stats = FieldStats::new(Arc::from("score"), 0);
         for i in 0..100 {
             score_stats.record(&json!(i));
         }
@@ -1452,7 +1473,7 @@ mod tests {
         let mut stats = vec![];
 
         // Email field
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("user@example.com"));
         }
@@ -1460,7 +1481,7 @@ mod tests {
         stats.push(email_stats);
 
         // UUID field
-        let mut uuid_stats = FieldStats::new("user_id".to_string(), 0);
+        let mut uuid_stats = FieldStats::new(Arc::from("user_id"), 0);
         for _ in 0..100 {
             uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
         }
@@ -1491,7 +1512,7 @@ mod tests {
         let mut stats = vec![];
 
         // High density field (should be required)
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("test@example.com"));
         }
@@ -1499,7 +1520,7 @@ mod tests {
         stats.push(email_stats);
 
         // Low density field (should not be required)
-        let mut optional_stats = FieldStats::new("optional".to_string(), 0);
+        let mut optional_stats = FieldStats::new(Arc::from("optional"), 0);
         for _ in 0..80 {
             optional_stats.record(&json!("value"));
         }
@@ -1526,7 +1547,7 @@ mod tests {
 
         let mut stats = vec![];
 
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("test@example.com"));
         }
@@ -1550,7 +1571,7 @@ mod tests {
         let mut stats = vec![];
 
         // Field with some null values
-        let mut nullable_stats = FieldStats::new("nickname".to_string(), 0);
+        let mut nullable_stats = FieldStats::new(Arc::from("nickname"), 0);
         for _ in 0..70 {
             nullable_stats.record(&json!("Bob"));
         }
@@ -1574,7 +1595,7 @@ mod tests {
         let mut stats = vec![];
 
         // Field with mixed types (string and number)
-        let mut mixed_stats = FieldStats::new("value".to_string(), 0);
+        let mut mixed_stats = FieldStats::new(Arc::from("value"), 0);
         for _ in 0..60 {
             mixed_stats.record(&json!("text"));
         }
@@ -1598,7 +1619,7 @@ mod tests {
         let mut stats = vec![];
 
         // Email (required, with format)
-        let mut email_stats = FieldStats::new("email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("user@example.com"));
         }
@@ -1606,7 +1627,7 @@ mod tests {
         stats.push(email_stats);
 
         // Age (required, with constraints)
-        let mut age_stats = FieldStats::new("age".to_string(), 0);
+        let mut age_stats = FieldStats::new(Arc::from("age"), 0);
         for i in 18..118 {
             age_stats.record(&json!(i));
         }
@@ -1614,7 +1635,7 @@ mod tests {
         stats.push(age_stats);
 
         // Role (enum)
-        let mut role_stats = FieldStats::new("role".to_string(), 0);
+        let mut role_stats = FieldStats::new(Arc::from("role"), 0);
         for _ in 0..50 {
             role_stats.record(&json!("user"));
         }
@@ -1628,7 +1649,7 @@ mod tests {
         stats.push(role_stats);
 
         // Active (boolean, required)
-        let mut active_stats = FieldStats::new("is_active".to_string(), 0);
+        let mut active_stats = FieldStats::new(Arc::from("is_active"), 0);
         for _ in 0..100 {
             active_stats.record(&json!(true));
         }
@@ -1636,7 +1657,7 @@ mod tests {
         stats.push(active_stats);
 
         // UUID
-        let mut uuid_stats = FieldStats::new("user_id".to_string(), 0);
+        let mut uuid_stats = FieldStats::new(Arc::from("user_id"), 0);
         for _ in 0..100 {
             uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
         }
@@ -1644,7 +1665,7 @@ mod tests {
         stats.push(uuid_stats);
 
         // Nullable field
-        let mut bio_stats = FieldStats::new("bio".to_string(), 0);
+        let mut bio_stats = FieldStats::new(Arc::from("bio"), 0);
         for _ in 0..70 {
             bio_stats.record(&json!("Software developer"));
         }
@@ -1654,18 +1675,18 @@ mod tests {
         bio_stats.finalize(100);
         stats.push(bio_stats);
 
-        let schema = generator.generate_json_schema(
-            &stats,
-            Some("User Schema".to_string()),
-            100,
-            false
-        );
+        let schema =
+            generator.generate_json_schema(&stats, Some("User Schema".to_string()), 100, false);
 
         // Validate the complex schema
-        validate_json_schema(&schema).expect("Complex realistic schema should be valid JSON Schema 2020-12");
+        validate_json_schema(&schema)
+            .expect("Complex realistic schema should be valid JSON Schema 2020-12");
 
         // Verify key properties
-        assert_eq!(schema.schema_version, "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(
+            schema.schema_version,
+            "https://json-schema.org/draft/2020-12/schema"
+        );
         assert_eq!(schema.title, Some("User Schema".to_string()));
         assert_eq!(schema.properties.len(), 6);
         assert!(schema.required.contains(&"email".to_string()));
@@ -1685,7 +1706,7 @@ mod tests {
         let mut stats = vec![];
 
         // Nested field: user.name
-        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        let mut name_stats = FieldStats::new(Arc::from("user.name"), 0);
         for _ in 0..100 {
             name_stats.record(&json!("Alice"));
         }
@@ -1693,7 +1714,7 @@ mod tests {
         stats.push(name_stats);
 
         // Nested field: user.email
-        let mut email_stats = FieldStats::new("user.email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("user.email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("alice@example.com"));
         }
@@ -1729,7 +1750,7 @@ mod tests {
         let mut stats = vec![];
 
         // Deeply nested: user.profile.settings.theme
-        let mut theme_stats = FieldStats::new("user.profile.settings.theme".to_string(), 0);
+        let mut theme_stats = FieldStats::new(Arc::from("user.profile.settings.theme"), 0);
         for _ in 0..100 {
             theme_stats.record(&json!("dark"));
         }
@@ -1762,7 +1783,7 @@ mod tests {
         let mut stats = vec![];
 
         // Top-level field
-        let mut id_stats = FieldStats::new("id".to_string(), 0);
+        let mut id_stats = FieldStats::new(Arc::from("id"), 0);
         for _ in 0..100 {
             id_stats.record(&json!(123));
         }
@@ -1770,7 +1791,7 @@ mod tests {
         stats.push(id_stats);
 
         // Nested field
-        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        let mut name_stats = FieldStats::new(Arc::from("user.name"), 0);
         for _ in 0..100 {
             name_stats.record(&json!("Alice"));
         }
@@ -1778,7 +1799,7 @@ mod tests {
         stats.push(name_stats);
 
         // Another top-level field
-        let mut active_stats = FieldStats::new("active".to_string(), 0);
+        let mut active_stats = FieldStats::new(Arc::from("active"), 0);
         for _ in 0..100 {
             active_stats.record(&json!(true));
         }
@@ -1817,7 +1838,7 @@ mod tests {
         ];
 
         for (path, value) in fields {
-            let mut field_stats = FieldStats::new(path.to_string(), 0);
+            let mut field_stats = FieldStats::new(Arc::from(path), 0);
             for _ in 0..100 {
                 field_stats.record(&value);
             }
@@ -1851,7 +1872,7 @@ mod tests {
         let mut stats = vec![];
 
         // Top-level required field
-        let mut id_stats = FieldStats::new("id".to_string(), 0);
+        let mut id_stats = FieldStats::new(Arc::from("id"), 0);
         for _ in 0..100 {
             id_stats.record(&json!(123));
         }
@@ -1859,7 +1880,7 @@ mod tests {
         stats.push(id_stats);
 
         // Required nested field (user.email - 100% density)
-        let mut email_stats = FieldStats::new("user.email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("user.email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("user@example.com"));
         }
@@ -1867,7 +1888,7 @@ mod tests {
         stats.push(email_stats);
 
         // Optional nested field (user.bio - 80% density)
-        let mut bio_stats = FieldStats::new("user.bio".to_string(), 0);
+        let mut bio_stats = FieldStats::new(Arc::from("user.bio"), 0);
         for _ in 0..80 {
             bio_stats.record(&json!("Developer"));
         }
@@ -1895,7 +1916,7 @@ mod tests {
         let mut stats = vec![];
 
         // Nested email field
-        let mut email_stats = FieldStats::new("contact.email".to_string(), 0);
+        let mut email_stats = FieldStats::new(Arc::from("contact.email"), 0);
         for _ in 0..100 {
             email_stats.record(&json!("user@example.com"));
         }
@@ -1903,7 +1924,7 @@ mod tests {
         stats.push(email_stats);
 
         // Nested UUID field
-        let mut uuid_stats = FieldStats::new("contact.user_id".to_string(), 0);
+        let mut uuid_stats = FieldStats::new(Arc::from("contact.user_id"), 0);
         for _ in 0..100 {
             uuid_stats.record(&json!("550e8400-e29b-41d4-a716-446655440000"));
         }
@@ -1934,7 +1955,7 @@ mod tests {
         let mut stats = vec![];
 
         // Nested enum field
-        let mut role_stats = FieldStats::new("permissions.role".to_string(), 0);
+        let mut role_stats = FieldStats::new(Arc::from("permissions.role"), 0);
         for _ in 0..40 {
             role_stats.record(&json!("admin"));
         }
@@ -1972,7 +1993,7 @@ mod tests {
 
         let mut stats = vec![];
 
-        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        let mut name_stats = FieldStats::new(Arc::from("user.name"), 0);
         for _ in 0..100 {
             name_stats.record(&json!("Alice"));
         }
@@ -2000,7 +2021,7 @@ mod tests {
         let mut stats = vec![];
 
         // First nested object
-        let mut user_name_stats = FieldStats::new("user.name".to_string(), 0);
+        let mut user_name_stats = FieldStats::new(Arc::from("user.name"), 0);
         for _ in 0..100 {
             user_name_stats.record(&json!("Alice"));
         }
@@ -2008,7 +2029,7 @@ mod tests {
         stats.push(user_name_stats);
 
         // Second nested object
-        let mut config_theme_stats = FieldStats::new("config.theme".to_string(), 0);
+        let mut config_theme_stats = FieldStats::new(Arc::from("config.theme"), 0);
         for _ in 0..100 {
             config_theme_stats.record(&json!("dark"));
         }
@@ -2016,7 +2037,7 @@ mod tests {
         stats.push(config_theme_stats);
 
         // Third nested object
-        let mut meta_version_stats = FieldStats::new("metadata.version".to_string(), 0);
+        let mut meta_version_stats = FieldStats::new(Arc::from("metadata.version"), 0);
         for _ in 0..100 {
             meta_version_stats.record(&json!("1.0"));
         }
@@ -2042,7 +2063,7 @@ mod tests {
         let mut stats = vec![];
 
         // Regular nested field
-        let mut name_stats = FieldStats::new("user.name".to_string(), 0);
+        let mut name_stats = FieldStats::new(Arc::from("user.name"), 0);
         for _ in 0..100 {
             name_stats.record(&json!("Alice"));
         }
@@ -2050,7 +2071,7 @@ mod tests {
         stats.push(name_stats);
 
         // Array path (should now be included)
-        let mut items_stats = FieldStats::new("items[].id".to_string(), 0);
+        let mut items_stats = FieldStats::new(Arc::from("items[].id"), 0);
         for _ in 0..100 {
             items_stats.record(&json!(123));
         }
@@ -2102,7 +2123,7 @@ mod tests {
 
         for uuid in &uuid_keys {
             // Create stats for the UUID key itself (ghost key)
-            let mut uuid_stats = FieldStats::new(uuid.to_string(), 0);
+            let mut uuid_stats = FieldStats::new(Arc::from(*uuid), 0);
             for _ in 0..uuid_sample_count {
                 uuid_stats.record(&json!({"name": "Alice", "email": "alice@example.com"}));
             }
@@ -2111,7 +2132,7 @@ mod tests {
 
             // Each UUID has a name field
             let path = format!("{}.name", uuid);
-            let mut name_stats = FieldStats::new(path, 0);
+            let mut name_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             for _ in 0..uuid_sample_count {
                 name_stats.record(&json!("Alice"));
             }
@@ -2120,7 +2141,7 @@ mod tests {
 
             // Each UUID has an email field
             let path = format!("{}.email", uuid);
-            let mut email_stats = FieldStats::new(path, 0);
+            let mut email_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             for _ in 0..uuid_sample_count {
                 email_stats.record(&json!("alice@example.com"));
             }
@@ -2128,7 +2149,7 @@ mod tests {
             stats.push(email_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         // Print the generated schema for inspection
         println!("\n=== Generated Schema with UUID Pattern Properties ===");
@@ -2144,7 +2165,8 @@ mod tests {
 
         // Should have UUID pattern
         assert_eq!(pattern_props.len(), 1);
-        let uuid_pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        let uuid_pattern =
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
         assert!(pattern_props.contains_key(uuid_pattern));
 
         // The UUID pattern should have an object schema with name and email properties
@@ -2155,7 +2177,10 @@ mod tests {
         assert!(uuid_props.contains_key("email"));
 
         // UUID keys should NOT be in regular properties (they're excluded)
-        assert!(schema.properties.is_empty(), "UUID keys should be excluded from properties when using patternProperties");
+        assert!(
+            schema.properties.is_empty(),
+            "UUID keys should be excluded from properties when using patternProperties"
+        );
     }
 
     #[test]
@@ -2168,7 +2193,7 @@ mod tests {
         let total_samples = 10000;
 
         // devices appears in 0.8% of samples (ghost key)
-        let mut devices_stats = FieldStats::new("devices".to_string(), 0);
+        let mut devices_stats = FieldStats::new(Arc::from("devices"), 0);
         for _ in 0..78 {
             devices_stats.record(&json!({}));
         }
@@ -2184,20 +2209,20 @@ mod tests {
 
         for uuid in &uuid_keys {
             let path = format!("devices.{}", uuid);
-            let mut uuid_stats = FieldStats::new(path.clone(), 0);
+            let mut uuid_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             uuid_stats.record(&json!({}));
             uuid_stats.finalize(total_samples);
             stats.push(uuid_stats);
 
             // Each has a device_no field
             let path = format!("devices.{}.device_no", uuid);
-            let mut device_no_stats = FieldStats::new(path, 0);
+            let mut device_no_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             device_no_stats.record(&json!(1));
             device_no_stats.finalize(total_samples);
             stats.push(device_no_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Schema with nested UUID devices ===");
         println!("{}", schema.to_json_string());
@@ -2208,22 +2233,35 @@ mod tests {
         let devices_prop = schema.properties.get("devices").unwrap();
 
         // devices should have patternProperties for UUIDs
-        assert!(devices_prop.pattern_properties.is_some(), "devices should have patternProperties");
+        assert!(
+            devices_prop.pattern_properties.is_some(),
+            "devices should have patternProperties"
+        );
         let pattern_props = devices_prop.pattern_properties.as_ref().unwrap();
 
         // Should have UUID pattern
-        let uuid_pattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
-        assert!(pattern_props.contains_key(uuid_pattern), "devices should have UUID pattern property");
+        let uuid_pattern =
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        assert!(
+            pattern_props.contains_key(uuid_pattern),
+            "devices should have UUID pattern property"
+        );
 
         // Individual UUIDs should NOT be in properties
-        assert!(devices_prop.properties.is_none() || devices_prop.properties.as_ref().unwrap().is_empty(),
-            "Individual UUID keys should be excluded from properties");
+        assert!(
+            devices_prop.properties.is_none()
+                || devices_prop.properties.as_ref().unwrap().is_empty(),
+            "Individual UUID keys should be excluded from properties"
+        );
 
         // The pattern should have device_no property
         let uuid_schema = &pattern_props[uuid_pattern];
         assert!(uuid_schema.properties.is_some());
         let uuid_props = uuid_schema.properties.as_ref().unwrap();
-        assert!(uuid_props.contains_key("device_no"), "UUID pattern should include device_no property");
+        assert!(
+            uuid_props.contains_key("device_no"),
+            "UUID pattern should include device_no property"
+        );
     }
 
     #[test]
@@ -2236,7 +2274,7 @@ mod tests {
         let total_samples = 10000;
 
         // devices appears in 0.8% of samples
-        let mut devices_stats = FieldStats::new("devices".to_string(), 0);
+        let mut devices_stats = FieldStats::new(Arc::from("devices"), 0);
         for _ in 0..84 {
             devices_stats.record(&json!({}));
         }
@@ -2244,28 +2282,24 @@ mod tests {
         stats.push(devices_stats);
 
         // 16-character hex device IDs (lowercase)
-        let hex_ids = vec![
-            "cacfa794927a8c4b",
-            "e79c968dd761ef4f",
-            "55108ee4bc11a3cd",
-        ];
+        let hex_ids = vec!["cacfa794927a8c4b", "e79c968dd761ef4f", "55108ee4bc11a3cd"];
 
         for hex_id in &hex_ids {
             let path = format!("devices.{}", hex_id);
-            let mut hex_stats = FieldStats::new(path.clone(), 0);
+            let mut hex_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             hex_stats.record(&json!({}));
             hex_stats.finalize(total_samples);
             stats.push(hex_stats);
 
             // Each has a device_no field
             let path = format!("devices.{}.device_no", hex_id);
-            let mut device_no_stats = FieldStats::new(path, 0);
+            let mut device_no_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             device_no_stats.record(&json!(1));
             device_no_stats.finalize(total_samples);
             stats.push(device_no_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Schema with hex device IDs ===");
         println!("{}", schema.to_json_string());
@@ -2276,22 +2310,34 @@ mod tests {
         let devices_prop = schema.properties.get("devices").unwrap();
 
         // devices should have patternProperties for hex strings
-        assert!(devices_prop.pattern_properties.is_some(), "devices should have patternProperties");
+        assert!(
+            devices_prop.pattern_properties.is_some(),
+            "devices should have patternProperties"
+        );
         let pattern_props = devices_prop.pattern_properties.as_ref().unwrap();
 
         // Should have hex string pattern
         let hex_pattern = "^[0-9a-fA-F]{16}$";
-        assert!(pattern_props.contains_key(hex_pattern), "devices should have hex string pattern property");
+        assert!(
+            pattern_props.contains_key(hex_pattern),
+            "devices should have hex string pattern property"
+        );
 
         // Individual hex IDs should NOT be in properties
-        assert!(devices_prop.properties.is_none() || devices_prop.properties.as_ref().unwrap().is_empty(),
-            "Individual hex keys should be excluded from properties");
+        assert!(
+            devices_prop.properties.is_none()
+                || devices_prop.properties.as_ref().unwrap().is_empty(),
+            "Individual hex keys should be excluded from properties"
+        );
 
         // The pattern should have device_no property
         let hex_schema = &pattern_props[hex_pattern];
         assert!(hex_schema.properties.is_some());
         let hex_props = hex_schema.properties.as_ref().unwrap();
-        assert!(hex_props.contains_key("device_no"), "Hex pattern should include device_no property");
+        assert!(
+            hex_props.contains_key("device_no"),
+            "Hex pattern should include device_no property"
+        );
     }
 
     #[test]
@@ -2311,7 +2357,7 @@ mod tests {
         ];
 
         for (path, value) in fields {
-            let mut field_stats = FieldStats::new(path.to_string(), 0);
+            let mut field_stats = FieldStats::new(Arc::from(path), 0);
             for _ in 0..100 {
                 field_stats.record(&value);
             }
@@ -2325,7 +2371,10 @@ mod tests {
         validate_json_schema(&schema).expect("Schema with only array paths should be valid");
 
         // Should NOT be empty - should have tokens property
-        assert!(!schema.properties.is_empty(), "Schema should not have empty properties");
+        assert!(
+            !schema.properties.is_empty(),
+            "Schema should not have empty properties"
+        );
         assert!(schema.properties.contains_key("tokens"));
 
         // tokens should be an array
@@ -2364,20 +2413,20 @@ mod tests {
         let numeric_ids = vec!["123456", "789012", "345678"];
 
         for id in &numeric_ids {
-            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            let mut id_stats = FieldStats::new(Arc::from(*id), 0);
             id_stats.record(&json!({"value": "data"}));
             id_stats.finalize(total_samples);
             stats.push(id_stats);
 
             // Each ID has a value field
             let path = format!("{}.value", id);
-            let mut value_stats = FieldStats::new(path, 0);
+            let mut value_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             value_stats.record(&json!("data"));
             value_stats.finalize(total_samples);
             stats.push(value_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Custom Numeric ID Pattern Schema ===");
         println!("{}", schema.to_json_string());
@@ -2411,13 +2460,13 @@ mod tests {
         let hex_ids = vec!["abc123def4567890", "fedcba9876543210"];
 
         for id in &hex_ids {
-            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            let mut id_stats = FieldStats::new(Arc::from(*id), 0);
             id_stats.record(&json!({"data": "test"}));
             id_stats.finalize(total_samples);
             stats.push(id_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         // Should still use patternProperties (custom pattern matches)
         assert!(schema.pattern_properties.is_some());
@@ -2437,7 +2486,7 @@ mod tests {
         let total_samples = 10000;
 
         // Parent object
-        let mut sessions_stats = FieldStats::new("sessions".to_string(), 0);
+        let mut sessions_stats = FieldStats::new(Arc::from("sessions"), 0);
         for _ in 0..100 {
             sessions_stats.record(&json!({}));
         }
@@ -2453,20 +2502,20 @@ mod tests {
 
         for token in &session_tokens {
             let path = format!("sessions.{}", token);
-            let mut token_stats = FieldStats::new(path.clone(), 0);
+            let mut token_stats = FieldStats::new(Arc::from(path.as_str()), 0);
             token_stats.record(&json!({"expires": "2025-01-12"}));
             token_stats.finalize(total_samples);
             stats.push(token_stats);
 
             // Each session has an expires field
             let expires_path = format!("{}.expires", path);
-            let mut expires_stats = FieldStats::new(expires_path, 0);
+            let mut expires_stats = FieldStats::new(Arc::from(expires_path.as_str()), 0);
             expires_stats.record(&json!("2025-01-12"));
             expires_stats.finalize(total_samples);
             stats.push(expires_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Nested Custom Pattern Schema ===");
         println!("{}", schema.to_json_string());
@@ -2482,14 +2531,17 @@ mod tests {
         assert!(pattern_props.contains_key("^session_[0-9a-f]{32}$"));
 
         // Individual session tokens should NOT be in properties
-        assert!(sessions_prop.properties.is_none() || sessions_prop.properties.as_ref().unwrap().is_empty());
+        assert!(
+            sessions_prop.properties.is_none()
+                || sessions_prop.properties.as_ref().unwrap().is_empty()
+        );
     }
 
     #[test]
     fn test_schema_with_multiple_custom_patterns() {
         let config = SchemaConfig::default();
         let pattern_config = crate::pattern::PatternConfig::with_patterns(vec![
-            "^user_[0-9]+$".to_string(),    // User IDs like user_123
+            "^user_[0-9]+$".to_string(),             // User IDs like user_123
             "^api_key_[A-Za-z0-9]{40}$".to_string(), // API keys
         ]);
         let generator = SchemaGenerator::with_patterns(config, pattern_config);
@@ -2500,7 +2552,7 @@ mod tests {
         // User IDs (ghost keys)
         let user_ids = vec!["user_123", "user_456"];
         for user_id in &user_ids {
-            let mut id_stats = FieldStats::new(user_id.to_string(), 0);
+            let mut id_stats = FieldStats::new(Arc::from(*user_id), 0);
             id_stats.record(&json!({"name": "Alice"}));
             id_stats.finalize(total_samples);
             stats.push(id_stats);
@@ -2512,13 +2564,13 @@ mod tests {
             "api_key_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
         ];
         for api_key in &api_keys {
-            let mut key_stats = FieldStats::new(api_key.to_string(), 0);
+            let mut key_stats = FieldStats::new(Arc::from(*api_key), 0);
             key_stats.record(&json!({"permissions": ["read", "write"]}));
             key_stats.finalize(total_samples);
             stats.push(key_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Multiple Custom Patterns Schema ===");
         println!("{}", schema.to_json_string());
@@ -2534,7 +2586,11 @@ mod tests {
 
         // No individual keys in properties
         assert!(!schema.properties.contains_key("user_123"));
-        assert!(!schema.properties.contains_key("api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD"));
+        assert!(
+            !schema
+                .properties
+                .contains_key("api_key_abcdefghijklmnopqrstuvwxyz1234567890ABCD")
+        );
     }
 
     #[test]
@@ -2552,7 +2608,7 @@ mod tests {
         // Custom pattern keys
         let custom_ids = vec!["custom_1234", "custom_5678"];
         for id in &custom_ids {
-            let mut id_stats = FieldStats::new(id.to_string(), 0);
+            let mut id_stats = FieldStats::new(Arc::from(*id), 0);
             id_stats.record(&json!({"value": "custom"}));
             id_stats.finalize(total_samples);
             stats.push(id_stats);
@@ -2564,13 +2620,13 @@ mod tests {
             "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
         ];
         for uuid in &uuid_keys {
-            let mut uuid_stats = FieldStats::new(uuid.to_string(), 0);
+            let mut uuid_stats = FieldStats::new(Arc::from(*uuid), 0);
             uuid_stats.record(&json!({"value": "uuid"}));
             uuid_stats.finalize(total_samples);
             stats.push(uuid_stats);
         }
 
-        let schema = generator.generate_json_schema(&stats, None, total_samples as u64, false);
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
 
         println!("\n=== Custom + Built-in Patterns Schema ===");
         println!("{}", schema.to_json_string());
@@ -2582,7 +2638,8 @@ mod tests {
 
         // Should have both custom and built-in UUID pattern
         assert!(pattern_props.contains_key("^custom_[0-9]{4}$"));
-        assert!(pattern_props.contains_key("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
+        assert!(pattern_props.contains_key(
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        ));
     }
 }
-

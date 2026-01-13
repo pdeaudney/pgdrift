@@ -222,10 +222,8 @@ mod tests {
 
     #[test]
     fn test_prefix_wildcard_with_uuids() {
-        let filter = PathFilter::with_patterns(vec![
-            "*.created_at".to_string(),
-            "*.updated_at".to_string(),
-        ]);
+        let filter =
+            PathFilter::with_patterns(vec!["*.created_at".to_string(), "*.updated_at".to_string()]);
 
         // Should match UUID-keyed fields with these suffixes
         assert!(filter.should_ignore("550e8400-e29b-41d4-a716-446655440000.created_at"));
@@ -250,9 +248,9 @@ mod tests {
     #[test]
     fn test_combined_suffix_and_prefix_wildcards() {
         let filter = PathFilter::with_patterns(vec![
-            "internal.*".to_string(),      // Suffix wildcard
-            "*.timestamp".to_string(),      // Prefix wildcard
-            "user.email".to_string(),       // Exact match
+            "internal.*".to_string(),  // Suffix wildcard
+            "*.timestamp".to_string(), // Prefix wildcard
+            "user.email".to_string(),  // Exact match
         ]);
 
         // Suffix wildcard matches
@@ -339,7 +337,7 @@ mod tests {
     fn test_prefix_wildcard_overlapping_patterns() {
         let filter = PathFilter::with_patterns(vec![
             "*.metadata".to_string(),
-            "user.metadata".to_string(),  // Both should match user.metadata
+            "user.metadata".to_string(), // Both should match user.metadata
         ]);
 
         // Should match via both patterns

@@ -22,7 +22,8 @@ async fn test_index_recommendations_consistent_schema() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -44,7 +45,8 @@ async fn test_index_recommendations_sparse_fields() {
         "users_sparse",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -66,7 +68,8 @@ async fn test_index_recommendations_type_inconsistency() {
         "users_mixed_types",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -88,7 +91,8 @@ async fn test_index_with_table_format() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Table, PathFilter::new(),
+        OutputFormat::Table,
+        PathFilter::new(),
     )
     .await;
 
@@ -110,7 +114,8 @@ async fn test_index_with_markdown_format() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Markdown, PathFilter::new(),
+        OutputFormat::Markdown,
+        PathFilter::new(),
     )
     .await;
 
@@ -132,7 +137,8 @@ async fn test_index_with_schema_table_notation() {
         "public.users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -154,7 +160,8 @@ async fn test_index_with_custom_sample_size() {
         "users",
         "metadata",
         100, // small sample size
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -180,7 +187,8 @@ async fn test_index_invalid_table() {
         "nonexistent_table",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -205,7 +213,8 @@ async fn test_index_invalid_column() {
         "users",
         "nonexistent_column",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -224,7 +233,8 @@ async fn test_index_invalid_database_url() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -260,7 +270,8 @@ async fn test_index_empty_column() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -309,7 +320,8 @@ async fn test_index_with_high_density_strings() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -357,7 +369,8 @@ async fn test_index_with_number_fields() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -405,7 +418,8 @@ async fn test_index_with_boolean_fields() {
         "users",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -431,7 +445,8 @@ async fn test_index_sql_injection_in_table_name() {
         "users; DROP TABLE users; --",
         "metadata",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -464,7 +479,8 @@ async fn test_index_sql_injection_in_column_name() {
         "users",
         "metadata; DROP TABLE users; --",
         1000,
-        OutputFormat::Json, PathFilter::new(),
+        OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
