@@ -1,7 +1,7 @@
 use crate::stats::FieldStats;
 use crate::types::JsonType;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Severity level for drift issues
@@ -57,6 +57,14 @@ pub enum DriftIssue {
         path: String,
         pattern: EvolutionPattern,
     },
+    /// Dynamic key pattern detected (UUID/hex-like keys), collapsing noisy ghost keys
+    DynamicKeyPattern {
+        path: String,
+        pattern: String,
+        key_count: usize,
+        affected_paths: usize,
+        child_path_examples: Vec<String>,
+    },
 }
 
 /// Type distribution
@@ -106,6 +114,7 @@ impl DriftIssue {
             DriftIssue::GhostKey { .. } => Severity::Info,
             DriftIssue::SparseField { .. } => Severity::Info,
             DriftIssue::SchemaEvolution { .. } => Severity::Warning,
+            DriftIssue::DynamicKeyPattern { .. } => Severity::Info,
         }
     }
 
@@ -117,6 +126,7 @@ impl DriftIssue {
             DriftIssue::SparseField { path, .. } => path,
             DriftIssue::MissingKey { path, .. } => path,
             DriftIssue::SchemaEvolution { path, .. } => path,
+            DriftIssue::DynamicKeyPattern { path, .. } => path,
         }
     }
 
@@ -197,8 +207,36 @@ impl DriftIssue {
                     )
                 }
             },
+            DriftIssue::DynamicKeyPattern {
+                pattern,
+                key_count,
+                affected_paths,
+                child_path_examples,
+                ..
+            } => {
+                let mut summary = format!(
+                    "Dynamic key pattern ({}): {} keys across {} ghost paths",
+                    pattern, key_count, affected_paths
+                );
+                if !child_path_examples.is_empty() {
+                    summary.push_str(&format!(
+                        "; child paths: {}",
+                        child_path_examples.join(", ")
+                    ));
+                }
+                summary
+            }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct DynamicGhostGroup {
+    path: String,
+    pattern: String,
+    dynamic_keys: HashSet<String>,
+    affected_paths: HashSet<String>,
+    canonical_paths: HashSet<String>,
 }
 
 /// Configuration for drift detection thresholds
@@ -241,15 +279,25 @@ pub fn detect_drift(
     stats: &HashMap<Arc<str>, FieldStats>,
     config: &DriftConfig,
 ) -> Vec<DriftIssue> {
+    let dynamic_key_groups = detect_dynamic_key_groups(stats, config.sparse_field_threshold);
+    let suppressed_dynamic_paths: HashSet<&str> = dynamic_key_groups
+        .values()
+        .flat_map(|group| group.affected_paths.iter().map(String::as_str))
+        .collect();
+
     let mut issues = Vec::new();
     for field_stats in stats.values() {
         if let Some(issue) = detect_type_inconsistency(field_stats, config) {
             issues.push(issue);
         }
-        if let Some(issue) = detect_ghost_key(field_stats, config) {
+        if let Some(issue) = detect_ghost_key(field_stats, config)
+            && !suppressed_dynamic_paths.contains(issue.path())
+        {
             issues.push(issue);
         }
-        if let Some(issue) = detect_sparse_field(field_stats, config) {
+        if let Some(issue) = detect_sparse_field(field_stats, config)
+            && !suppressed_dynamic_paths.contains(issue.path())
+        {
             issues.push(issue);
         }
         if let Some(issue) = detect_missing_key(field_stats, config) {
@@ -261,6 +309,25 @@ pub fn detect_drift(
         issues.extend(detect_schema_evolution(stats));
     }
 
+    for group in dynamic_key_groups.values() {
+        let mut child_path_examples: Vec<String> = group
+            .canonical_paths
+            .iter()
+            .filter(|p| p.as_str() != group.path)
+            .cloned()
+            .collect();
+        child_path_examples.sort();
+        child_path_examples.truncate(5);
+
+        issues.push(DriftIssue::DynamicKeyPattern {
+            path: group.path.clone(),
+            pattern: group.pattern.clone(),
+            key_count: group.dynamic_keys.len(),
+            affected_paths: group.affected_paths.len(),
+            child_path_examples,
+        });
+    }
+
     issues.sort_by(|a, b| {
         b.severity()
             .cmp(&a.severity())
@@ -268,6 +335,134 @@ pub fn detect_drift(
     });
 
     issues
+}
+
+fn detect_dynamic_key_groups(
+    stats: &HashMap<Arc<str>, FieldStats>,
+    max_density_threshold: f64,
+) -> HashMap<String, DynamicGhostGroup> {
+    let mut groups: HashMap<String, DynamicGhostGroup> = HashMap::new();
+
+    for stat in stats.values() {
+        if stat.density <= 0.0 || stat.density > max_density_threshold {
+            continue;
+        }
+
+        let path = stat.path.as_ref();
+        let segments: Vec<&str> = path.split('.').collect();
+
+        let Some((idx, segment, pattern)) = segments
+            .iter()
+            .enumerate()
+            .find_map(|(i, s)| detect_dynamic_segment_pattern(s).map(|p| (i, *s, p)))
+        else {
+            continue;
+        };
+
+        let parent_path = if idx == 0 {
+            String::new()
+        } else {
+            segments[..idx].join(".")
+        };
+        let path_label = if parent_path.is_empty() {
+            "{dynamic}".to_string()
+        } else {
+            format!("{}.{{dynamic}}", parent_path)
+        };
+        let group_id = format!("{}|{}", parent_path, pattern);
+
+        let group = groups.entry(group_id).or_insert_with(|| DynamicGhostGroup {
+            path: path_label,
+            pattern: pattern.to_string(),
+            dynamic_keys: HashSet::new(),
+            affected_paths: HashSet::new(),
+            canonical_paths: HashSet::new(),
+        });
+
+        let canonical_path = segments
+            .iter()
+            .enumerate()
+            .map(|(i, part)| {
+                if i == idx {
+                    "{dynamic}".to_string()
+                } else {
+                    (*part).to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+
+        group.dynamic_keys.insert(segment.to_string());
+        group.affected_paths.insert(path.to_string());
+        group.canonical_paths.insert(canonical_path);
+    }
+
+    groups.retain(|_, group| group.dynamic_keys.len() >= 2);
+    groups
+}
+
+fn detect_dynamic_segment_pattern(segment: &str) -> Option<&'static str> {
+    if is_uuid_segment(segment)
+        || is_text_prefixed_uuid_segment(segment)
+        || is_keyset_prefixed_uuid_segment(segment)
+        || is_generic_prefixed_hex32_segment(segment)
+    {
+        Some("uuid")
+    } else if is_hex16_segment(segment) {
+        Some("hex16")
+    } else {
+        None
+    }
+}
+
+fn is_uuid_segment(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts[0].len() == 8
+        && parts[1].len() == 4
+        && parts[2].len() == 4
+        && parts[3].len() == 4
+        && parts[4].len() == 12
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+fn is_hex16_segment(s: &str) -> bool {
+    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_hex32_segment(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_text_prefixed_uuid_segment(s: &str) -> bool {
+    strip_prefix_ascii_case_insensitive(s, "text_")
+        .is_some_and(|suffix| is_uuid_segment(suffix) || is_hex32_segment(suffix))
+}
+
+fn is_keyset_prefixed_uuid_segment(s: &str) -> bool {
+    strip_prefix_ascii_case_insensitive(s, "keyset_")
+        .is_some_and(|suffix| is_uuid_segment(suffix) || is_hex32_segment(suffix))
+}
+
+fn is_generic_prefixed_hex32_segment(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('_') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_alphanumeric())
+        && is_hex32_segment(suffix)
+}
+
+fn strip_prefix_ascii_case_insensitive<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    let (head, tail) = s.split_at(prefix.len());
+    if head.eq_ignore_ascii_case(prefix) {
+        Some(tail)
+    } else {
+        None
+    }
 }
 
 /// Detect type inconsistency: field appears as multiple types
@@ -760,5 +955,293 @@ mod tests {
 
         let issue = detect_type_inconsistency(&stats, &config);
         assert!(issue.is_none());
+    }
+
+    #[test]
+    fn test_detect_drift_collapses_deep_nested_uuid_ghost_paths() {
+        let mut stats = HashMap::new();
+        let total_samples = 1000;
+
+        let uuid_keys = vec![
+            "72275de8-f6a7-4150-a8df-5b57876e6129",
+            "7CF3BCB4-A44E-40AD-91E1-8237E3E6317D",
+            "7ae5bcbf-81ed-4f92-9b21-f054c106c5c0",
+        ];
+
+        for uuid in &uuid_keys {
+            let base = format!("template_data.media.{}", uuid);
+            stats.insert(
+                Arc::from(base.as_str()),
+                create_field_stats(
+                    base.as_str(),
+                    37,
+                    total_samples,
+                    vec![(JsonType::Object, 37)],
+                ),
+            );
+
+            let date_created = format!("{}.date_created", base);
+            stats.insert(
+                Arc::from(date_created.as_str()),
+                create_field_stats(
+                    date_created.as_str(),
+                    37,
+                    total_samples,
+                    vec![(JsonType::String, 37)],
+                ),
+            );
+
+            let file_ext = format!("{}.file_ext", base);
+            stats.insert(
+                Arc::from(file_ext.as_str()),
+                create_field_stats(
+                    file_ext.as_str(),
+                    37,
+                    total_samples,
+                    vec![(JsonType::String, 37)],
+                ),
+            );
+        }
+
+        let issues = detect_drift(&stats, &DriftConfig::default());
+
+        let dynamic_issue = issues.iter().find(|i| {
+            matches!(
+                i,
+                DriftIssue::DynamicKeyPattern {
+                    path,
+                    pattern,
+                    key_count,
+                    ..
+                } if path == "template_data.media.{dynamic}" && pattern == "uuid" && *key_count == 3
+            )
+        });
+        assert!(
+            dynamic_issue.is_some(),
+            "expected grouped dynamic-key issue for deep nested uuid paths"
+        );
+
+        let uuid_ghosts: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                matches!(i, DriftIssue::GhostKey { .. })
+                    && i.path().contains("template_data.media.")
+                    && uuid_keys.iter().any(|k| i.path().contains(k))
+            })
+            .collect();
+
+        assert!(
+            uuid_ghosts.is_empty(),
+            "individual uuid ghost keys should be collapsed into one dynamic-key issue"
+        );
+    }
+
+    #[test]
+    fn test_detect_drift_collapses_text_prefixed_uuid_ghost_paths() {
+        let mut stats = HashMap::new();
+        let total_samples = 1000;
+
+        let text_uuid_keys = vec![
+            "text_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "text_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+            "text_CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+        ];
+
+        for key in &text_uuid_keys {
+            let base = format!("template_data.media.{}", key);
+            stats.insert(
+                Arc::from(base.as_str()),
+                create_field_stats(
+                    base.as_str(),
+                    37,
+                    total_samples,
+                    vec![(JsonType::Object, 37)],
+                ),
+            );
+        }
+
+        let issues = detect_drift(&stats, &DriftConfig::default());
+        let dynamic_issue = issues.iter().find(|i| {
+            matches!(
+                i,
+                DriftIssue::DynamicKeyPattern {
+                    path,
+                    pattern,
+                    key_count,
+                    ..
+                } if path == "template_data.media.{dynamic}" && pattern == "uuid" && *key_count == 3
+            )
+        });
+
+        assert!(
+            dynamic_issue.is_some(),
+            "expected grouped dynamic-key issue for text_<uuid> paths"
+        );
+    }
+
+    #[test]
+    fn test_detect_drift_collapses_nested_uuid_sparse_paths() {
+        let mut stats = HashMap::new();
+        let total_samples = 1000;
+
+        let uuid_keys = vec![
+            "7bb1cb11-7020-11e2-bcfd-0800200c9a66",
+            "8bcfbf00-e11b-11e1-9b23-0800200c9a66",
+            "968fa791-89dc-4528-9825-8271849d84b7",
+        ];
+
+        for uuid in &uuid_keys {
+            let base = format!("template_data.response_sets.{}", uuid);
+            stats.insert(
+                Arc::from(base.as_str()),
+                create_field_stats(
+                    base.as_str(),
+                    135,
+                    total_samples,
+                    vec![(JsonType::Object, 135)],
+                ),
+            );
+
+            let responses = format!("{}.responses[]", base);
+            stats.insert(
+                Arc::from(responses.as_str()),
+                create_field_stats(
+                    responses.as_str(),
+                    135,
+                    total_samples,
+                    vec![(JsonType::Object, 135)],
+                ),
+            );
+
+            let response_type = format!("{}.type", responses);
+            stats.insert(
+                Arc::from(response_type.as_str()),
+                create_field_stats(
+                    response_type.as_str(),
+                    135,
+                    total_samples,
+                    vec![(JsonType::String, 135)],
+                ),
+            );
+        }
+
+        let issues = detect_drift(&stats, &DriftConfig::default());
+
+        let dynamic_issue = issues.iter().find(|i| {
+            matches!(
+                i,
+                DriftIssue::DynamicKeyPattern {
+                    path,
+                    pattern,
+                    key_count,
+                    ..
+                } if path == "template_data.response_sets.{dynamic}" && pattern == "uuid" && *key_count == 3
+            )
+        });
+        assert!(
+            dynamic_issue.is_some(),
+            "expected grouped dynamic-key issue for nested uuid sparse paths"
+        );
+
+        let dynamic_description = dynamic_issue.unwrap().description();
+        assert!(
+            dynamic_description.contains("template_data.response_sets.{dynamic}.responses[].type"),
+            "expected dynamic-key description to include canonical child path preview, got: {}",
+            dynamic_description
+        );
+
+        let uuid_sparse: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                matches!(i, DriftIssue::SparseField { .. })
+                    && i.path().contains("template_data.response_sets.")
+                    && uuid_keys.iter().any(|k| i.path().contains(k))
+            })
+            .collect();
+
+        assert!(
+            uuid_sparse.is_empty(),
+            "individual uuid sparse fields should be collapsed into one dynamic-key issue"
+        );
+    }
+
+    #[test]
+    fn test_detect_drift_collapses_keyset_prefixed_hex_uuid_paths() {
+        let mut stats = HashMap::new();
+        let total_samples = 1000;
+
+        let keys = vec![
+            "keyset_f77b7b8a6cb8419785e2de93efcc2ab3",
+            "keyset_f9e7ce66b5ea4c8781c5101fb55e3ff8",
+            "keyset_ffdaf7b183164d0d83192346912bc86d",
+        ];
+
+        for key in &keys {
+            let base = format!("template_data.response_sets.{}", key);
+            stats.insert(
+                Arc::from(base.as_str()),
+                create_field_stats(
+                    base.as_str(),
+                    54,
+                    total_samples,
+                    vec![(JsonType::Object, 54)],
+                ),
+            );
+
+            let response_id = format!("{}.responses[].id", base);
+            stats.insert(
+                Arc::from(response_id.as_str()),
+                create_field_stats(
+                    response_id.as_str(),
+                    162,
+                    total_samples,
+                    vec![(JsonType::String, 162)],
+                ),
+            );
+        }
+
+        let issues = detect_drift(&stats, &DriftConfig::default());
+
+        let dynamic_issue = issues.iter().find(|i| {
+            matches!(
+                i,
+                DriftIssue::DynamicKeyPattern {
+                    path,
+                    pattern,
+                    key_count,
+                    ..
+                } if path == "template_data.response_sets.{dynamic}" && pattern == "uuid" && *key_count == 3
+            )
+        });
+        assert!(
+            dynamic_issue.is_some(),
+            "expected grouped dynamic-key issue for keyset_<hex32> paths"
+        );
+
+        let per_key_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                (matches!(i, DriftIssue::GhostKey { .. })
+                    || matches!(i, DriftIssue::SparseField { .. }))
+                    && keys.iter().any(|k| i.path().contains(k))
+            })
+            .collect();
+
+        assert!(
+            per_key_issues.is_empty(),
+            "individual keyset_<hex32> paths should be collapsed into one dynamic-key issue"
+        );
+    }
+
+    #[test]
+    fn test_detect_dynamic_segment_pattern_text_prefix_case_insensitive() {
+        let segment = "TEXT_AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAA1";
+        assert_eq!(detect_dynamic_segment_pattern(segment), Some("uuid"));
+    }
+
+    #[test]
+    fn test_detect_dynamic_segment_pattern_generic_prefix_hex32() {
+        let segment = "role_00662ba6aee245529de7f22c8f78020b";
+        assert_eq!(detect_dynamic_segment_pattern(segment), Some("uuid"));
     }
 }

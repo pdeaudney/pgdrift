@@ -24,6 +24,7 @@ async fn test_index_recommendations_consistent_schema() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -47,6 +48,7 @@ async fn test_index_recommendations_sparse_fields() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -70,6 +72,7 @@ async fn test_index_recommendations_type_inconsistency() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -93,6 +96,7 @@ async fn test_index_with_table_format() {
         1000,
         OutputFormat::Table,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -116,6 +120,7 @@ async fn test_index_with_markdown_format() {
         1000,
         OutputFormat::Markdown,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -139,6 +144,7 @@ async fn test_index_with_schema_table_notation() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -162,6 +168,7 @@ async fn test_index_with_custom_sample_size() {
         100, // small sample size
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -189,6 +196,7 @@ async fn test_index_invalid_table() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -215,6 +223,7 @@ async fn test_index_invalid_column() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -235,6 +244,7 @@ async fn test_index_invalid_database_url() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -272,6 +282,7 @@ async fn test_index_empty_column() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -322,6 +333,7 @@ async fn test_index_with_high_density_strings() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -371,6 +383,7 @@ async fn test_index_with_number_fields() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -420,6 +433,7 @@ async fn test_index_with_boolean_fields() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -447,6 +461,7 @@ async fn test_index_sql_injection_in_table_name() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -481,6 +496,7 @@ async fn test_index_sql_injection_in_column_name() {
         1000,
         OutputFormat::Json,
         PathFilter::new(),
+        None,
     )
     .await;
 

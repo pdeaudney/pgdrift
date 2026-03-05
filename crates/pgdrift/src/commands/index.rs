@@ -13,6 +13,7 @@ pub async fn run(
     sample_size: usize,
     format: OutputFormat,
     filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
 ) -> Result<()> {
     let (schema, table) = parse_table_name(table);
 
@@ -25,7 +26,7 @@ pub async fn run(
         );
     }
 
-    let conn = ConnectionPool::new(database_url)
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to create database connection pool")?;
 

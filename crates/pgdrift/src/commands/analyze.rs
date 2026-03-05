@@ -6,6 +6,7 @@ use pgdrift_core::filter::PathFilter;
 use pgdrift_db::{ConnectionPool, Sampler};
 
 /// run performs analysis of a specified jsonb column in a PostgreSQL database
+#[allow(dead_code)]
 pub async fn run(
     database_url: &str,
     table: &str,
@@ -14,6 +15,50 @@ pub async fn run(
     format: OutputFormat,
     filter: PathFilter,
 ) -> Result<()> {
+    run_with_pool_lifetime(
+        database_url,
+        table,
+        column,
+        sample_size,
+        format,
+        filter,
+        None,
+    )
+    .await
+}
+
+/// Run analysis with explicit pool lifetime override.
+pub async fn run_with_pool_lifetime(
+    database_url: &str,
+    table: &str,
+    column: &str,
+    sample_size: usize,
+    format: OutputFormat,
+    filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
+) -> Result<()> {
+    let result = run_with_result(
+        database_url,
+        table,
+        column,
+        sample_size,
+        filter,
+        pool_max_lifetime_secs,
+    )
+    .await?;
+    print_analysis(&result, &format);
+    Ok(())
+}
+
+/// Run analysis and return structured results without printing.
+pub async fn run_with_result(
+    database_url: &str,
+    table: &str,
+    column: &str,
+    sample_size: usize,
+    filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
+) -> Result<AnalysisResult> {
     let (schema, table) = parse_table_name(table);
 
     // Show filter info if patterns are active
@@ -25,7 +70,7 @@ pub async fn run(
         );
     }
 
-    let conn = ConnectionPool::new(database_url)
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to create database connection pool")?;
 
@@ -70,8 +115,7 @@ pub async fn run(
         drift_issues,
     };
 
-    print_analysis(&result, &format);
-    Ok(())
+    Ok(result)
 }
 
 /// Parse table name into schema and table components

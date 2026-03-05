@@ -24,6 +24,7 @@ async fn test_schema_consistent_schema() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -52,6 +53,7 @@ async fn test_schema_pg_jsonschema_format() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -80,6 +82,7 @@ async fn test_schema_strict_mode() {
         true, // strict mode
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -108,6 +111,7 @@ async fn test_schema_relaxed_mode() {
         false, // relaxed mode
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -136,6 +140,7 @@ async fn test_schema_required_threshold() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -152,6 +157,7 @@ async fn test_schema_required_threshold() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -180,6 +186,7 @@ async fn test_schema_with_schema_prefix() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -208,6 +215,7 @@ async fn test_schema_type_inconsistency() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -236,6 +244,7 @@ async fn test_schema_handles_deep_nesting() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -268,6 +277,7 @@ async fn test_schema_with_path_filter() {
         false,
         filter,
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -292,6 +302,7 @@ async fn test_schema_invalid_table() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -320,6 +331,7 @@ async fn test_schema_invalid_column() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -355,6 +367,7 @@ async fn test_schema_empty_column() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -382,6 +395,7 @@ async fn test_schema_invalid_database_url() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -423,6 +437,7 @@ async fn test_schema_all_null_column() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -465,6 +480,7 @@ async fn test_schema_sql_injection_table_name() {
             false,
             PathFilter::new(),
             PatternConfig::new(),
+            None,
         )
         .await;
 
@@ -521,6 +537,7 @@ async fn test_schema_empty_json_objects() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -553,6 +570,7 @@ async fn test_schema_schema_evolution() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -581,6 +599,7 @@ async fn test_schema_extreme_thresholds() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -597,6 +616,7 @@ async fn test_schema_extreme_thresholds() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -678,6 +698,7 @@ async fn test_schema_field_type_mutation() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -733,6 +754,7 @@ async fn test_schema_format_detection() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -785,6 +807,7 @@ async fn test_schema_simple_nested_objects() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -847,6 +870,7 @@ async fn test_schema_deeply_nested_objects() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -908,6 +932,7 @@ async fn test_schema_mixed_nested_and_flat() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -962,6 +987,7 @@ async fn test_schema_nested_strict_mode() {
         true, // strict mode
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -1024,6 +1050,7 @@ async fn test_schema_multiple_nested_objects() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -1082,6 +1109,7 @@ async fn test_schema_nested_with_formats() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 
@@ -1137,6 +1165,7 @@ async fn test_schema_nested_pg_jsonschema() {
         false,
         PathFilter::new(),
         PatternConfig::new(),
+        None,
     )
     .await;
 

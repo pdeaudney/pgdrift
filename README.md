@@ -983,6 +983,27 @@ export DATABASE_URL="postgres://readonly_user:pass@prod.example.com:5432/prod_db
 pgdrift analyze users metadata
 ```
 
+Optional pool/session tuning (useful when the server enforces short `session_timeout`):
+
+```bash
+export PGDRIFT_POOL_MAX_CONNECTIONS=5
+export PGDRIFT_POOL_MAX_LIFETIME_SECS=45
+export PGDRIFT_POOL_IDLE_TIMEOUT_SECS=15
+export PGDRIFT_POOL_ACQUIRE_TIMEOUT_SECS=30
+```
+
+Set `PGDRIFT_POOL_MAX_LIFETIME_SECS` lower than your PostgreSQL `session_timeout` so pooled
+connections are recycled before the server terminates them.
+
+You can also set max lifetime per run with a global CLI flag (applies to all subcommands, including `schema`):
+
+```bash
+pgdrift analyze users metadata --pool-max-lifetime-secs 45
+pgdrift schema users metadata --pool-max-lifetime-secs 45
+```
+
+`--pool-max-lifetime-secs` overrides `PGDRIFT_POOL_MAX_LIFETIME_SECS`.
+
 ## Performance
 
 pgdrift is designed to handle large-scale databases efficiently:

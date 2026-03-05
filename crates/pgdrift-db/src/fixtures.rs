@@ -244,6 +244,56 @@ pub async fn create_products_schema_evolution(pool: &PgPool) -> Result<(), sqlx:
     Ok(())
 }
 
+/// Create table with deeply nested dynamic UUID keys using sanitized test data.
+pub async fn create_users_nested_dynamic_uuid_sanitized(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS users_nested_dynamic (
+            id SERIAL PRIMARY KEY,
+            metadata JSONB NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let uuid_keys = [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        "text_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+        "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+    ];
+
+    for i in 0..1000 {
+        let media = if i < 370 {
+            let uuid = uuid_keys[i % uuid_keys.len()];
+            json!({
+                uuid: {
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "file_ext": "bin",
+                    "label": format!("asset_{}", i),
+                    "asset_id": format!("asset_{}", i),
+                    "item_id": format!("item_{}", i)
+                }
+            })
+        } else {
+            json!({})
+        };
+
+        let metadata = json!({
+            "template_data": {
+                "media": media
+            }
+        });
+
+        sqlx::query("INSERT INTO users_nested_dynamic (metadata) VALUES ($1)")
+            .bind(metadata)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
+
 /// Clean up all test tables
 pub async fn cleanup(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("DROP TABLE IF EXISTS users")
@@ -259,6 +309,9 @@ pub async fn cleanup(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     sqlx::query("DROP TABLE IF EXISTS products")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP TABLE IF EXISTS users_nested_dynamic")
         .execute(pool)
         .await?;
     Ok(())

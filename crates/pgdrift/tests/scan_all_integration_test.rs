@@ -23,6 +23,7 @@ async fn test_scan_all_single_column() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -59,6 +60,7 @@ async fn test_scan_all_multiple_columns() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -91,6 +93,7 @@ async fn test_scan_all_with_drift_issues() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -115,6 +118,7 @@ async fn test_scan_all_no_columns() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -146,6 +150,7 @@ async fn test_scan_all_table_format() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -173,6 +178,7 @@ async fn test_scan_all_markdown_format() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -204,6 +210,7 @@ async fn test_scan_all_with_custom_sample_size() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -229,6 +236,7 @@ async fn test_scan_all_invalid_database_url() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -271,6 +279,7 @@ async fn test_scan_all_continues_on_column_error() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -302,6 +311,7 @@ async fn test_scan_all_with_schema_evolution() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -329,6 +339,7 @@ async fn test_scan_all_with_deep_nesting() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -365,6 +376,7 @@ async fn test_scan_all_aggregates_drift_correctly() {
         None,
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -402,6 +414,7 @@ async fn test_scan_all_filter_by_schema() {
         Some("public".to_string()),
         None,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -435,6 +448,7 @@ async fn test_scan_all_filter_by_table() {
         None,
         Some("users".to_string()),
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -468,6 +482,7 @@ async fn test_scan_all_filter_by_schema_and_table() {
         Some("public".to_string()),
         Some("users".to_string()),
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -496,6 +511,7 @@ async fn test_scan_all_filter_no_matches() {
         None,
         Some("nonexistent_table".to_string()),
         PathFilter::new(),
+        None,
     )
     .await;
 

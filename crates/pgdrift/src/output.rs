@@ -104,12 +104,51 @@ impl From<&DriftIssue> for DriftRow {
             Severity::Critical => "Critical",
         };
 
+        let issue_text = match issue {
+            DriftIssue::DynamicKeyPattern {
+                pattern,
+                key_count,
+                affected_paths,
+                child_path_examples,
+                ..
+            } => format_dynamic_issue_for_table(
+                pattern,
+                *key_count,
+                *affected_paths,
+                child_path_examples,
+            ),
+            _ => issue.description(),
+        };
+
         Self {
             path: issue.path().to_string(),
             severity: severity_str.to_string(),
-            issue: issue.description(),
+            issue: issue_text,
         }
     }
+}
+
+fn format_dynamic_issue_for_table(
+    pattern: &str,
+    key_count: usize,
+    affected_paths: usize,
+    child_path_examples: &[String],
+) -> String {
+    let mut lines = vec![format!(
+        "Dynamic key pattern ({}): {} keys across {} ghost paths",
+        pattern, key_count, affected_paths
+    )];
+
+    if !child_path_examples.is_empty() {
+        lines.push("child paths:".to_string());
+        lines.extend(
+            child_path_examples
+                .iter()
+                .map(|child_path| format!("  - {}", child_path)),
+        );
+    }
+
+    lines.join("\n")
 }
 
 pub struct AnalysisResult {

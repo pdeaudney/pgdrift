@@ -5,6 +5,25 @@ All notable changes to pgdrift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### CLI & Connection Pooling
+
+- Added global `--pool-max-lifetime-secs <SECONDS>` CLI argument.
+  - Applies to all commands (`discover`, `analyze`, `index`, `scan-all`, `migrate`, `schema`).
+  - Can be used to keep pool connection lifetimes below server-enforced `session_timeout`.
+- Added `ConnectionPool::new_with_max_lifetime_secs(...)` for explicit pool max-lifetime overrides.
+
+### Changed
+
+#### Sampling & Sessions
+
+- Full-scan sampling now runs in short paged batches instead of one long-lived streaming query.
+  - Reduces backend session activity duration per query.
+  - Allows connection reuse/rotation through the pool between batches.
+
 ## [0.1.0] - 2026-01-02
 
 ### Added

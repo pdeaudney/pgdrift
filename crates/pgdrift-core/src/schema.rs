@@ -282,7 +282,7 @@ impl SchemaGenerator {
             self.build_property_tree(stats, &excluded_keys);
 
         // Apply pattern detection recursively to nested objects
-        self.apply_nested_pattern_detection(&mut root_properties, stats);
+        self.apply_nested_pattern_detection(&mut root_properties, stats, "");
 
         JsonSchema {
             schema_version: "https://json-schema.org/draft/2020-12/schema".to_string(),
@@ -366,10 +366,11 @@ impl SchemaGenerator {
     ) -> (HashMap<String, PropertySchema>, Vec<String>) {
         use std::collections::HashMap;
 
-        // Group stats by the next key segment after the prefix
-        // Only consider keys that are ghost keys (low density)
+        // Group stats by the next key segment after the prefix.
+        // Dynamic-key patterns (UUID/prefixed-hex/custom) should be detected
+        // regardless of density because some datasets contain many dynamic keys
+        // that are still frequent.
         let mut key_groups: HashMap<String, Vec<&FieldStats>> = HashMap::new();
-        let mut key_densities: HashMap<String, f64> = HashMap::new();
 
         for stat in stats {
             // Skip if not at this prefix level
@@ -405,29 +406,15 @@ impl SchemaGenerator {
 
             if let Some(key) = key_name {
                 key_groups.entry(key.clone()).or_default().push(stat);
-
-                // Track density - use the stat's density if it's the key itself
-                if (path_prefix.is_empty() && stat.path.as_ref() == key)
-                    || (!path_prefix.is_empty()
-                        && stat.path.as_ref() == format!("{}.{}", path_prefix, key).as_str())
-                {
-                    key_densities.insert(key.clone(), stat.density);
-                }
             }
         }
 
-        // Detect patterns in the keys, but only for ghost keys
+        // Detect key patterns at this level.
         let mut pattern_groups: HashMap<KeyPattern, Vec<(String, Vec<&FieldStats>)>> =
             HashMap::new();
 
         for (key, stats_list) in key_groups {
-            // Check if this is a ghost key (low density)
-            let is_ghost_key = key_densities
-                .get(&key)
-                .map(|d| *d <= self.config.ghost_key_threshold)
-                .unwrap_or(false);
-
-            if is_ghost_key && let Some(pattern) = KeyPattern::detect(&key, &self.pattern_config) {
+            if let Some(pattern) = KeyPattern::detect(&key, &self.pattern_config) {
                 pattern_groups
                     .entry(pattern)
                     .or_default()
@@ -465,16 +452,28 @@ impl SchemaGenerator {
         &self,
         properties: &mut HashMap<String, PropertySchema>,
         all_stats: &[FieldStats],
+        current_path: &str,
     ) {
         for (prop_name, prop_schema) in properties.iter_mut() {
+            let prop_path = if current_path.is_empty() {
+                prop_name.to_string()
+            } else {
+                format!("{}.{}", current_path, prop_name)
+            };
+
+            let is_object_type = match prop_schema.property_type.as_ref() {
+                Some(PropertyType::Single(type_name)) => type_name == "object",
+                Some(PropertyType::Multiple(type_names)) => {
+                    type_names.iter().any(|t| t == "object")
+                }
+                None => false,
+            };
+
             // Only process object types with child properties
-            if let Some(PropertyType::Single(ref type_name)) = prop_schema.property_type
-                && type_name == "object"
-                && let Some(ref mut child_props) = prop_schema.properties
-            {
+            if is_object_type && let Some(ref mut child_props) = prop_schema.properties {
                 // Check if child properties should use pattern properties
                 let (pattern_props, excluded) =
-                    self.detect_nested_patterns(child_props, all_stats, prop_name);
+                    self.detect_nested_patterns(child_props, all_stats, &prop_path);
 
                 if !pattern_props.is_empty() {
                     // Remove excluded properties
@@ -487,7 +486,7 @@ impl SchemaGenerator {
                 }
 
                 // Recurse into child properties
-                self.apply_nested_pattern_detection(child_props, all_stats);
+                self.apply_nested_pattern_detection(child_props, all_stats, &prop_path);
             }
         }
     }
@@ -500,23 +499,17 @@ impl SchemaGenerator {
         parent_path: &str,
     ) -> (HashMap<String, PropertySchema>, Vec<String>) {
         let mut pattern_groups: HashMap<KeyPattern, Vec<String>> = HashMap::new();
-        let mut key_densities: HashMap<String, f64> = HashMap::new();
 
-        // Collect densities for each child key
+        // Detect key patterns in nested object properties.
         for child_key in child_properties.keys() {
             let full_path = format!("{}.{}", parent_path, child_key);
 
             // Find the stat for this path
-            if let Some(stat) = all_stats
+            if all_stats
                 .iter()
-                .find(|s| s.path.as_ref() == full_path.as_str())
+                .any(|s| s.path.as_ref() == full_path.as_str())
             {
-                key_densities.insert(child_key.clone(), stat.density);
-
-                // Check if this is a ghost key and matches a pattern
-                if stat.density <= self.config.ghost_key_threshold
-                    && let Some(pattern) = KeyPattern::detect(child_key, &self.pattern_config)
-                {
+                if let Some(pattern) = KeyPattern::detect(child_key, &self.pattern_config) {
                     pattern_groups
                         .entry(pattern)
                         .or_default()
@@ -1037,8 +1030,10 @@ fn is_uuid_format(s: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyPattern {
     Uuid,
-    HexString16,    // 16-character hex strings (device IDs, session tokens, etc.)
-    Custom(String), // Custom regex pattern
+    TextPrefixedUuid, // text_<uuid>
+    PrefixedHex32,    // <prefix>_<32-hex> (e.g. keyset_<id>, role_<id>)
+    HexString16,      // 16-character hex strings (device IDs, session tokens, etc.)
+    Custom(String),   // Custom regex pattern
 }
 
 impl KeyPattern {
@@ -1049,6 +1044,15 @@ impl KeyPattern {
                 // UUID pattern (case-insensitive)
                 "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
                     .to_string()
+            }
+            KeyPattern::TextPrefixedUuid => {
+                // text_<uuid> pattern (case-insensitive uuid portion)
+                "^text_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                    .to_string()
+            }
+            KeyPattern::PrefixedHex32 => {
+                // prefix_<32-hex> (case-insensitive hex)
+                "^[A-Za-z0-9]+_[0-9a-fA-F]{32}$".to_string()
             }
             KeyPattern::HexString16 => {
                 // 16-character hex string (device IDs, session tokens)
@@ -1062,6 +1066,10 @@ impl KeyPattern {
     fn detect_builtin(key: &str) -> Option<Self> {
         if is_uuid_format(key) {
             Some(KeyPattern::Uuid)
+        } else if is_text_prefixed_uuid_format(key) {
+            Some(KeyPattern::TextPrefixedUuid)
+        } else if is_prefixed_hex32_format(key) {
+            Some(KeyPattern::PrefixedHex32)
         } else if is_hex_string_16(key) {
             Some(KeyPattern::HexString16)
         } else {
@@ -1084,6 +1092,25 @@ impl KeyPattern {
 /// Check if a string is a 16-character hex string
 fn is_hex_string_16(s: &str) -> bool {
     s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_hex_string_32(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Check if a key matches text_<uuid> format
+fn is_text_prefixed_uuid_format(s: &str) -> bool {
+    s.strip_prefix("text_").is_some_and(is_uuid_format)
+}
+
+/// Check if a key matches <prefix>_<32-hex> format
+fn is_prefixed_hex32_format(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('_') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_alphanumeric())
+        && is_hex_string_32(suffix)
 }
 
 /// Quote a PostgreSQL identifier
@@ -2265,6 +2292,82 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_with_deeply_nested_uuid_pattern_properties() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 1000;
+
+        let mut template_data_stats = FieldStats::new(Arc::from("template_data"), 0);
+        for _ in 0..300 {
+            template_data_stats.record(&json!({}));
+        }
+        template_data_stats.finalize(total_samples);
+        stats.push(template_data_stats);
+
+        let mut assets_stats = FieldStats::new(Arc::from("template_data.assets"), 0);
+        for _ in 0..300 {
+            assets_stats.record(&json!({}));
+        }
+        assets_stats.finalize(total_samples);
+        stats.push(assets_stats);
+
+        let uuid_keys = vec![
+            "72275de8-f6a7-4150-a8df-5b57876e6129",
+            "7CF3BCB4-A44E-40AD-91E1-8237E3E6317D",
+            "7ae5bcbf-81ed-4f92-9b21-f054c106c5c0",
+        ];
+
+        for uuid in &uuid_keys {
+            let uuid_path = format!("template_data.assets.{}", uuid);
+            let mut uuid_stats = FieldStats::new(Arc::from(uuid_path.as_str()), 0);
+            for _ in 0..37 {
+                uuid_stats.record(&json!({}));
+            }
+            uuid_stats.finalize(total_samples);
+            stats.push(uuid_stats);
+
+            let date_created_path = format!("{}.date_created", uuid_path);
+            let mut date_created_stats = FieldStats::new(Arc::from(date_created_path.as_str()), 0);
+            for _ in 0..37 {
+                date_created_stats.record(&json!("2025-01-12T00:00:00Z"));
+            }
+            date_created_stats.finalize(total_samples);
+            stats.push(date_created_stats);
+
+            let file_ext_path = format!("{}.file_ext", uuid_path);
+            let mut file_ext_stats = FieldStats::new(Arc::from(file_ext_path.as_str()), 0);
+            for _ in 0..37 {
+                file_ext_stats.record(&json!("jpg"));
+            }
+            file_ext_stats.finalize(total_samples);
+            stats.push(file_ext_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
+        validate_json_schema(&schema).expect("Deep nested UUID schema should be valid");
+
+        let template_data_prop = schema.properties.get("template_data").unwrap();
+        let template_data_properties = template_data_prop.properties.as_ref().unwrap();
+        let assets_prop = template_data_properties.get("assets").unwrap();
+
+        assert!(
+            assets_prop.pattern_properties.is_some(),
+            "template_data.assets should have patternProperties"
+        );
+        let pattern_props = assets_prop.pattern_properties.as_ref().unwrap();
+        let uuid_pattern =
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        assert!(pattern_props.contains_key(uuid_pattern));
+
+        assert!(
+            assets_prop.properties.is_none() || assets_prop.properties.as_ref().unwrap().is_empty(),
+            "individual UUID keys should be excluded from assets properties"
+        );
+    }
+
+    #[test]
     fn test_schema_with_hex_device_ids() {
         // Test 16-character hex string device IDs (like in user's schema)
         let config = SchemaConfig::default();
@@ -2641,5 +2744,158 @@ mod tests {
         assert!(pattern_props.contains_key(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
         ));
+    }
+
+    #[test]
+    fn test_schema_with_text_prefixed_uuid_pattern_properties() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 1000;
+
+        let text_uuid_keys = vec![
+            "text_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "text_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+            "text_CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+        ];
+
+        for key in &text_uuid_keys {
+            let mut key_stats = FieldStats::new(Arc::from(*key), 0);
+            for _ in 0..37 {
+                key_stats.record(&json!({"label": "sanitized"}));
+            }
+            key_stats.finalize(total_samples);
+            stats.push(key_stats);
+
+            let label_path = format!("{}.label", key);
+            let mut label_stats = FieldStats::new(Arc::from(label_path.as_str()), 0);
+            for _ in 0..37 {
+                label_stats.record(&json!("sanitized"));
+            }
+            label_stats.finalize(total_samples);
+            stats.push(label_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
+        validate_json_schema(&schema).expect("Schema with text_<uuid> keys should be valid");
+
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+        let text_uuid_pattern =
+            "^text_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        assert!(pattern_props.contains_key(text_uuid_pattern));
+    }
+
+    #[test]
+    fn test_schema_with_prefixed_hex32_pattern_properties() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 1521;
+
+        let keys = vec![
+            "keyset_46a18700c6a340f889243b0f3c5c356e",
+            "keyset_f77b7b8a6cb8419785e2de93efcc2ab3",
+            "keyset_f9e7ce66b5ea4c8781c5101fb55e3ff8",
+        ];
+
+        for key in &keys {
+            let mut key_stats = FieldStats::new(Arc::from(*key), 0);
+            for _ in 0..54 {
+                key_stats.record(&json!({"id": "x"}));
+            }
+            key_stats.finalize(total_samples);
+            stats.push(key_stats);
+
+            let id_path = format!("{}.id", key);
+            let mut id_stats = FieldStats::new(Arc::from(id_path.as_str()), 0);
+            for _ in 0..54 {
+                id_stats.record(&json!("abc"));
+            }
+            id_stats.finalize(total_samples);
+            stats.push(id_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
+        validate_json_schema(&schema).expect("Schema with prefix_<hex32> keys should be valid");
+
+        assert!(schema.pattern_properties.is_some());
+        let pattern_props = schema.pattern_properties.as_ref().unwrap();
+        let prefixed_hex32_pattern = "^[A-Za-z0-9]+_[0-9a-fA-F]{32}$";
+        assert!(pattern_props.contains_key(prefixed_hex32_pattern));
+
+        for key in keys {
+            assert!(
+                !schema.properties.contains_key(key),
+                "Concrete prefixed-hex key should be excluded from regular properties"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_with_dense_nested_uuid_keys_use_pattern_properties() {
+        let config = SchemaConfig::default();
+        let generator = SchemaGenerator::new(config);
+
+        let mut stats = vec![];
+        let total_samples = 1554;
+
+        let mut response_sets_stats = FieldStats::new(Arc::from("template_data.response_sets"), 0);
+        for _ in 0..1193 {
+            response_sets_stats.record(&json!({}));
+        }
+        response_sets_stats.finalize(total_samples);
+        stats.push(response_sets_stats);
+
+        let keys = vec![
+            "b52a8b4c-048b-4f7d-99b9-c6b9680be5ed",
+            "86f2c450-67fa-11e5-86cf-5ddafd1a2b79",
+            "5b69aee5-0532-46a4-b2f5-d020d4d5381d",
+        ];
+
+        for key in &keys {
+            let key_path = format!("template_data.response_sets.{}", key);
+            let mut key_stats = FieldStats::new(Arc::from(key_path.as_str()), 0);
+            for _ in 0..1193 {
+                key_stats.record(&json!({}));
+            }
+            key_stats.finalize(total_samples);
+            stats.push(key_stats);
+
+            let responses_path = format!("{}.responses", key_path);
+            let mut responses_stats = FieldStats::new(Arc::from(responses_path.as_str()), 0);
+            for _ in 0..1193 {
+                responses_stats.record(&json!([]));
+            }
+            responses_stats.finalize(total_samples);
+            stats.push(responses_stats);
+        }
+
+        let schema = generator.generate_json_schema(&stats, None, total_samples, false);
+        validate_json_schema(&schema).expect("Schema with dense nested UUID keys should be valid");
+
+        let template_data = schema.properties.get("template_data").unwrap();
+        let template_data_props = template_data.properties.as_ref().unwrap();
+        let response_sets = template_data_props.get("response_sets").unwrap();
+
+        let uuid_pattern =
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        assert!(response_sets.pattern_properties.is_some());
+        let pattern_props = response_sets.pattern_properties.as_ref().unwrap();
+        assert!(pattern_props.contains_key(uuid_pattern));
+
+        let static_props = response_sets
+            .properties
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        for key in keys {
+            assert!(
+                !static_props.contains_key(key),
+                "Concrete UUID key should be excluded from response_sets properties"
+            );
+        }
     }
 }

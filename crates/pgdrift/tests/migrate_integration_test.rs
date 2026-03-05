@@ -23,6 +23,7 @@ async fn test_migrate_consistent_schema() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -50,6 +51,7 @@ async fn test_migrate_detects_candidates() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -77,6 +79,7 @@ async fn test_migrate_detects_type_warnings() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -109,6 +112,7 @@ async fn test_migrate_output_formats() {
             0.8,
             0.95,
             PathFilter::new(),
+            None,
         )
         .await;
 
@@ -142,6 +146,7 @@ async fn test_migrate_with_schema_prefix() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -169,6 +174,7 @@ async fn test_migrate_density_threshold() {
         0.95,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -184,6 +190,7 @@ async fn test_migrate_density_threshold() {
         0.5,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -211,6 +218,7 @@ async fn test_migrate_type_consistency_threshold() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -226,6 +234,7 @@ async fn test_migrate_type_consistency_threshold() {
         0.8,
         0.90,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -253,6 +262,7 @@ async fn test_migrate_handles_deep_nesting() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -284,6 +294,7 @@ async fn test_migrate_with_path_filter() {
         0.8,
         0.95,
         filter,
+        None,
     )
     .await;
 
@@ -307,6 +318,7 @@ async fn test_migrate_invalid_table() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -334,6 +346,7 @@ async fn test_migrate_invalid_column() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -368,6 +381,7 @@ async fn test_migrate_empty_column() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -394,6 +408,7 @@ async fn test_migrate_invalid_database_url() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -434,6 +449,7 @@ async fn test_migrate_all_null_column() {
         0.8,
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -475,6 +491,7 @@ async fn test_migrate_sql_injection_table_name() {
             0.8,
             0.95,
             PathFilter::new(),
+            None,
         )
         .await;
 
@@ -515,6 +532,7 @@ async fn test_migrate_schema_evolution() {
         0.4, // Lower threshold to catch evolving fields
         0.95,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -542,6 +560,7 @@ async fn test_migrate_extreme_thresholds() {
         1.0,
         1.0,
         PathFilter::new(),
+        None,
     )
     .await;
 
@@ -557,6 +576,7 @@ async fn test_migrate_extreme_thresholds() {
         0.0,
         0.0,
         PathFilter::new(),
+        None,
     )
     .await;
 

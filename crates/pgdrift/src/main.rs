@@ -10,6 +10,10 @@ mod output;
 )]
 #[command(author, version, long_about = None)]
 struct Cli {
+    /// Maximum connection lifetime in seconds (overrides PGDRIFT_POOL_MAX_LIFETIME_SECS)
+    #[arg(long, global = true, env = "PGDRIFT_POOL_MAX_LIFETIME_SECS")]
+    pool_max_lifetime_secs: Option<u64>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -204,13 +208,14 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let pool_max_lifetime_secs = cli.pool_max_lifetime_secs;
 
     match cli.command {
         Commands::Discover {
             database_url,
             format,
         } => {
-            commands::discover::run(&database_url, format).await?;
+            commands::discover::run(&database_url, format, pool_max_lifetime_secs).await?;
         }
         Commands::Analyze {
             database_url,
@@ -222,8 +227,16 @@ async fn main() -> anyhow::Result<()> {
             ignore_config,
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
-            commands::analyze::run(&database_url, &table, &column, sample_size, format, filter)
-                .await?;
+            commands::analyze::run_with_pool_lifetime(
+                &database_url,
+                &table,
+                &column,
+                sample_size,
+                format,
+                filter,
+                pool_max_lifetime_secs,
+            )
+            .await?;
         }
         Commands::Index {
             database_url,
@@ -235,8 +248,16 @@ async fn main() -> anyhow::Result<()> {
             ignore_config,
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
-            commands::index::run(&database_url, &table, &column, sample_size, format, filter)
-                .await?;
+            commands::index::run(
+                &database_url,
+                &table,
+                &column,
+                sample_size,
+                format,
+                filter,
+                pool_max_lifetime_secs,
+            )
+            .await?;
         }
         Commands::ScanAll {
             database_url,
@@ -248,8 +269,16 @@ async fn main() -> anyhow::Result<()> {
             ignore_config,
         } => {
             let filter = commands::load_path_filter(ignore_paths, ignore_config)?;
-            commands::scan_all::run(&database_url, sample_size, format, schema, table, filter)
-                .await?;
+            commands::scan_all::run(
+                &database_url,
+                sample_size,
+                format,
+                schema,
+                table,
+                filter,
+                pool_max_lifetime_secs,
+            )
+            .await?;
         }
         Commands::Migrate {
             database_url,
@@ -272,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 min_density,
                 min_type_consistency,
                 filter,
+                pool_max_lifetime_secs,
             )
             .await?;
         }
@@ -301,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
                 strict,
                 filter,
                 pattern_cfg,
+                pool_max_lifetime_secs,
             )
             .await?;
         }

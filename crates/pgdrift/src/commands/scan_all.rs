@@ -13,6 +13,7 @@ pub async fn run(
     schema_filter: Option<String>,
     table_filter: Option<String>,
     filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
 ) -> Result<()> {
     // Show filter info if patterns are active
     if !filter.patterns().is_empty() {
@@ -23,7 +24,7 @@ pub async fn run(
         );
     }
 
-    let conn = ConnectionPool::new(database_url)
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to connect to the database")?;
 

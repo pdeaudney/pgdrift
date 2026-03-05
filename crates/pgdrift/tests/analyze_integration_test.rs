@@ -1,5 +1,6 @@
 use pgdrift::commands::analyze;
 use pgdrift::output::OutputFormat;
+use pgdrift_core::drift::DriftIssue;
 use pgdrift_core::filter::PathFilter;
 use pgdrift_db::fixtures;
 use pgdrift_db::test_utils::TestDb;
@@ -100,6 +101,69 @@ async fn test_analyze_handles_deep_nesting() {
     .await;
 
     assert!(result.is_ok(), "Analyze command failed: {:?}", result.err());
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test analyze collapses deeply nested UUID and text_UUID ghost key paths.
+#[tokio::test]
+async fn test_analyze_collapses_deep_nested_dynamic_uuid_ghost_keys() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    fixtures::create_users_nested_dynamic_uuid_sanitized(&test_db.pool)
+        .await
+        .expect("Failed to create fixture");
+
+    let result = analyze::run_with_result(
+        test_db.database_url(),
+        "users_nested_dynamic",
+        "metadata",
+        1000,
+        PathFilter::new(),
+        None,
+    )
+    .await
+    .expect("Analyze command failed");
+
+    let dynamic_group = result.drift_issues.iter().find(|issue| {
+        matches!(
+            issue,
+            DriftIssue::DynamicKeyPattern {
+                path,
+                pattern,
+                key_count,
+                ..
+            } if path == "template_data.media.{dynamic}" && pattern == "uuid" && *key_count >= 2
+        )
+    });
+
+    assert!(
+        dynamic_group.is_some(),
+        "Expected a grouped dynamic UUID issue at template_data.media.{{dynamic}}"
+    );
+
+    let noisy_individual_uuid_ghosts: Vec<_> = result
+        .drift_issues
+        .iter()
+        .filter(|issue| {
+            matches!(issue, DriftIssue::GhostKey { .. })
+                && issue.path().starts_with("template_data.media.")
+                && (issue
+                    .path()
+                    .contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+                    || issue
+                        .path()
+                        .contains("text_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2")
+                    || issue
+                        .path()
+                        .contains("CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCC3"))
+        })
+        .collect();
+
+    assert!(
+        noisy_individual_uuid_ghosts.is_empty(),
+        "Expected per-key ghost noise to be collapsed for UUID-like dynamic keys"
+    );
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }

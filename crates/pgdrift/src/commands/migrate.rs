@@ -28,6 +28,7 @@ pub struct MigrateCommandConfig {
     pub min_density: f64,
     pub min_type_consistency: f64,
     pub filter: PathFilter,
+    pub pool_max_lifetime_secs: Option<u64>,
 }
 
 impl MigrateCommandConfig {
@@ -41,6 +42,7 @@ impl MigrateCommandConfig {
         min_density: f64,
         min_type_consistency: f64,
         filter: PathFilter,
+        pool_max_lifetime_secs: Option<u64>,
     ) -> Self {
         Self {
             database_url: database_url.into(),
@@ -51,6 +53,7 @@ impl MigrateCommandConfig {
             min_density,
             min_type_consistency,
             filter,
+            pool_max_lifetime_secs,
         }
     }
 }
@@ -66,6 +69,7 @@ pub async fn run(
     min_density: f64,
     min_type_consistency: f64,
     filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
 ) -> Result<()> {
     let config = MigrateCommandConfig::new(
         database_url,
@@ -76,6 +80,7 @@ pub async fn run(
         min_density,
         min_type_consistency,
         filter,
+        pool_max_lifetime_secs,
     );
     run_impl(config).await
 }
@@ -90,6 +95,7 @@ async fn run_impl(config: MigrateCommandConfig) -> Result<()> {
     let min_density = config.min_density;
     let min_type_consistency = config.min_type_consistency;
     let filter = config.filter;
+    let pool_max_lifetime_secs = config.pool_max_lifetime_secs;
     let (schema, table) = parse_table_name(table);
 
     // Show filter info if patterns are active
@@ -101,7 +107,7 @@ async fn run_impl(config: MigrateCommandConfig) -> Result<()> {
         );
     }
 
-    let conn = ConnectionPool::new(database_url)
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to create database connection pool")?;
 

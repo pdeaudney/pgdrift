@@ -39,6 +39,7 @@ pub struct SchemaCommandConfig {
     pub strict: bool,
     pub filter: PathFilter,
     pub pattern_config: PatternConfig,
+    pub pool_max_lifetime_secs: Option<u64>,
 }
 
 impl SchemaCommandConfig {
@@ -53,6 +54,7 @@ impl SchemaCommandConfig {
         strict: bool,
         filter: PathFilter,
         pattern_config: PatternConfig,
+        pool_max_lifetime_secs: Option<u64>,
     ) -> Self {
         Self {
             database_url: database_url.into(),
@@ -64,6 +66,7 @@ impl SchemaCommandConfig {
             strict,
             filter,
             pattern_config,
+            pool_max_lifetime_secs,
         }
     }
 }
@@ -80,6 +83,7 @@ pub async fn run(
     strict: bool,
     filter: PathFilter,
     pattern_config: PatternConfig,
+    pool_max_lifetime_secs: Option<u64>,
 ) -> Result<()> {
     let config = SchemaCommandConfig::new(
         database_url,
@@ -91,6 +95,7 @@ pub async fn run(
         strict,
         filter,
         pattern_config,
+        pool_max_lifetime_secs,
     );
     run_impl(config).await
 }
@@ -106,6 +111,7 @@ async fn run_impl(config: SchemaCommandConfig) -> Result<()> {
     let strict = config.strict;
     let filter = config.filter;
     let pattern_config = config.pattern_config;
+    let pool_max_lifetime_secs = config.pool_max_lifetime_secs;
     let (schema_name, table_name) = parse_table_name(table);
 
     // Show filter info if patterns are active
@@ -125,7 +131,7 @@ async fn run_impl(config: SchemaCommandConfig) -> Result<()> {
         );
     }
 
-    let conn = ConnectionPool::new(database_url)
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to create database connection pool")?;
 
