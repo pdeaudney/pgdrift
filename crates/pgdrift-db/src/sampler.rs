@@ -1,7 +1,11 @@
+use async_stream::stream;
 use futures::TryStreamExt;
+use futures::stream::Stream;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
+use sqlx::FromRow;
 use sqlx::PgPool;
+use std::pin::Pin;
 
 /// Sampling strategy selection based on table size
 #[derive(Debug, Clone, PartialEq)]
@@ -50,17 +54,25 @@ impl SamplingStrategy {
         Ok(match row_count {
             n if n < 100_000 => Self::Random { limit: sample_size },
             n if n < 10_000_000 => {
-                // try to find pk for Reservoir sampling
+                // Try to find numeric PK for Reservoir sampling
+                // Note: find_primary_key only returns numeric PKs (int, bigint, etc.)
+                // Non-numeric PKs (UUID, text, etc.) will return Err and fall back
                 match find_primary_key(pool, schema, table).await {
                     Ok(pk) => Self::ReservoirPK { sample_size, pk },
                     Err(_) => {
-                        // Fallback to random pk
-                        Self::Random { limit: sample_size }
+                        // No numeric PK found (table may have UUID, text PK, or no PK).
+                        // Use TABLESAMPLE here to avoid expensive ORDER BY random() sorts
+                        // that can trigger statement_timeout on medium/large tables.
+                        let pct = (sample_size as f32 / row_count as f32 * 100.0).clamp(0.1, 100.0);
+                        Self::TableSample {
+                            percentage: pct,
+                            limit: sample_size,
+                        }
                     }
                 }
             }
             _ => {
-                // for very large tables
+                // For very large tables, always use TABLESAMPLE
                 // Cap percentage at 100.0 (PostgreSQL limit) and minimum 0.1
                 let pct = (sample_size as f32 / row_count as f32 * 100.0).clamp(0.1, 100.0);
                 Self::TableSample {
@@ -141,6 +153,12 @@ pub struct Sampler {
     show_progress: bool,
 }
 
+#[derive(FromRow)]
+struct FullBatchRow {
+    value: Value,
+    ctid: String,
+}
+
 impl Sampler {
     /// Create a new sampler with auto select strat
     pub async fn new(
@@ -172,13 +190,209 @@ impl Sampler {
         self
     }
 
-    //// Execute the sampling strat and return jsonb valuies
+    /// Execute the sampling strategy and return a stream of batches
+    ///
+    /// This method returns batches of samples (up to 1000 per batch) to enable
+    /// constant memory usage regardless of table size. Each batch is yielded
+    /// as a Vec<Value> and can be processed incrementally.
+    ///
+    /// # Performance
+    /// - Memory: Constant ~10-20MB per batch vs loading all samples
+    /// - Processing: Can start analyzing before all samples are fetched
+    /// - Scalability: Works with tables of any size (10M+ rows)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut stream = sampler.sample_stream(pool, schema, table, column);
+    /// while let Some(batch_result) = stream.next().await {
+    ///     let batch = batch_result?;
+    ///     analyzer.analyze_batch(&batch);
+    ///     // Batch is dropped here, memory freed
+    /// }
+    /// ```
+    pub fn sample_stream<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        schema: &'a str,
+        table: &'a str,
+        column: &'a str,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<Value>, sqlx::Error>> + Send + 'a>> {
+        const BATCH_SIZE: usize = 1000;
+
+        let schema_quoted = quote_identifier(schema);
+        let table_quoted = quote_identifier(table);
+        let column_quoted = quote_identifier(column);
+
+        let query = self.strategy.build_query(schema, table, column);
+        let max_samples = self.strategy.max_samples();
+        let show_progress = self.show_progress;
+        let strategy = self.strategy.clone();
+
+        Box::pin(stream! {
+            // Create progress bar if enabled
+            let progress = if show_progress {
+                if matches!(strategy, SamplingStrategy::Full) {
+                    let pb = ProgressBar::new_spinner();
+                    pb.set_style(
+                        ProgressStyle::default_spinner()
+                            .template("[{elapsed_precise}] {spinner} {pos} samples")
+                            .expect("Invalid progress spinner template")
+                    );
+                    pb.enable_steady_tick(std::time::Duration::from_millis(120));
+                    Some(pb)
+                } else {
+                    let pb = ProgressBar::new(max_samples as u64);
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} samples")
+                            .expect("Invalid progress bar template")
+                            .progress_chars("█▓▒░"),
+                    );
+                    Some(pb)
+                }
+            } else {
+                None
+            };
+
+            let mut total_count = 0u64;
+
+            if matches!(strategy, SamplingStrategy::Full) {
+                let base_query = format!(
+                    "SELECT {column} AS value, ctid::text AS ctid \
+                     FROM {schema}.{table} \
+                     WHERE {column} IS NOT NULL \
+                     ORDER BY ctid \
+                     LIMIT {limit}",
+                    column = column_quoted,
+                    schema = schema_quoted,
+                    table = table_quoted,
+                    limit = BATCH_SIZE
+                );
+
+                let paged_query = format!(
+                    "SELECT {column} AS value, ctid::text AS ctid \
+                     FROM {schema}.{table} \
+                     WHERE {column} IS NOT NULL \
+                       AND ctid > $1::tid \
+                     ORDER BY ctid \
+                     LIMIT {limit}",
+                    column = column_quoted,
+                    schema = schema_quoted,
+                    table = table_quoted,
+                    limit = BATCH_SIZE
+                );
+
+                let mut ctid_cursor: Option<String> = None;
+
+                loop {
+                    let rows: Vec<FullBatchRow> = if let Some(ref cursor) = ctid_cursor {
+                        sqlx::query_as::<_, FullBatchRow>(&paged_query)
+                            .bind(cursor)
+                            .fetch_all(pool)
+                            .await?
+                    } else {
+                        sqlx::query_as::<_, FullBatchRow>(&base_query)
+                            .fetch_all(pool)
+                            .await?
+                    };
+
+                    if rows.is_empty() {
+                        break;
+                    }
+
+                    ctid_cursor = rows.last().map(|row| row.ctid.clone());
+                    let batch: Vec<Value> = rows.into_iter().map(|row| row.value).collect();
+                    total_count += batch.len() as u64;
+
+                    if let Some(ref pb) = progress {
+                        pb.set_position(total_count);
+                    }
+
+                    yield Ok(batch);
+                }
+            } else {
+                let mut rows = sqlx::query_scalar::<_, Value>(&query).fetch(pool);
+                let mut batch = Vec::with_capacity(BATCH_SIZE);
+
+                while let Some(value) = rows.try_next().await? {
+                    batch.push(value);
+                    total_count += 1;
+
+                    if batch.len() >= BATCH_SIZE {
+                        if let Some(ref pb) = progress {
+                            pb.set_position(total_count);
+                        }
+
+                        // Yield the batch and create a new one
+                        yield Ok(std::mem::take(&mut batch));
+                        batch = Vec::with_capacity(BATCH_SIZE);
+                    }
+                }
+
+                // Yield any remaining samples
+                if !batch.is_empty() {
+                    if let Some(ref pb) = progress {
+                        pb.set_position(total_count);
+                    }
+                    yield Ok(batch);
+                }
+
+                // TABLESAMPLE can return 0 rows if planner estimates are stale.
+                // Fall back to ORDER BY random() to still return representative samples.
+                if total_count == 0
+                    && let SamplingStrategy::TableSample { limit, .. } = strategy
+                {
+                    let fallback_query = format!(
+                        "SELECT {} FROM {}.{} WHERE {} IS NOT NULL ORDER BY random() LIMIT {}",
+                        column_quoted, schema_quoted, table_quoted, column_quoted, limit
+                    );
+
+                    let mut fallback_rows = sqlx::query_scalar::<_, Value>(&fallback_query).fetch(pool);
+                    let mut fallback_batch = Vec::with_capacity(BATCH_SIZE);
+
+                    while let Some(value) = fallback_rows.try_next().await? {
+                        fallback_batch.push(value);
+                        total_count += 1;
+
+                        if fallback_batch.len() >= BATCH_SIZE {
+                            if let Some(ref pb) = progress {
+                                pb.set_position(total_count);
+                            }
+                            yield Ok(std::mem::take(&mut fallback_batch));
+                            fallback_batch = Vec::with_capacity(BATCH_SIZE);
+                        }
+                    }
+
+                    if !fallback_batch.is_empty() {
+                        if let Some(ref pb) = progress {
+                            pb.set_position(total_count);
+                        }
+                        yield Ok(fallback_batch);
+                    }
+                }
+            }
+
+            if let Some(pb) = progress {
+                pb.finish_with_message(format!("Collected {} samples", total_count));
+            }
+        })
+    }
+
+    /// Execute the sampling strat and return jsonb values
+    ///
+    /// This method collects all samples into a Vec. For large datasets (>100k samples),
+    /// consider using `sample_stream()` instead for constant memory usage.
     ///
     /// # Production safety
     /// In prod mode:
     /// - Max 1% sampling for large tables
     /// - Requires explicit confirmation (future work)
     /// - shows estimated query
+    ///
+    /// # Backward Compatibility
+    /// This method wraps `sample_stream()` to maintain API compatibility.
+    /// It's suitable for small to medium datasets but may consume significant
+    /// memory for very large tables.
     pub async fn sample(
         &self,
         pool: &PgPool,
@@ -186,41 +400,17 @@ impl Sampler {
         table: &str,
         column: &str,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        let query = self.strategy.build_query(schema, table, column);
-        let max_samples = self.strategy.max_samples();
+        use futures::StreamExt;
 
-        // Create progress bar if enabled
-        let progress = if self.show_progress {
-            let pb = ProgressBar::new(max_samples as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} samples")
-                    .expect("Invalid progress bar template")
-                    .progress_chars("█▓▒░"),
-            );
-            Some(pb)
-        } else {
-            None
-        };
+        let mut all_samples = Vec::new();
+        let mut stream = self.sample_stream(pool, schema, table, column);
 
-        // Execute query and collect results
-        let mut samples = Vec::new();
-        let mut rows = sqlx::query_scalar::<_, Value>(&query).fetch(pool);
-
-        // Use sqlx's streaming to handle large result sets
-        while let Some(value) = rows.try_next().await? {
-            samples.push(value);
-
-            if let Some(ref pb) = progress {
-                pb.set_position(samples.len() as u64);
-            }
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            all_samples.extend(batch);
         }
 
-        if let Some(pb) = progress {
-            pb.finish_with_message(format!("Collected {} samples", samples.len()));
-        }
-
-        Ok(samples)
+        Ok(all_samples)
     }
     /// Get information about the sampling strategy
     pub fn strategy_info(&self) -> String {
@@ -242,14 +432,36 @@ impl Sampler {
     }
 }
 
+/// Find a numeric primary key suitable for ReservoirPK sampling strategy
+///
+/// This function only returns primary keys of numeric types (int, bigint, smallint, etc.)
+/// because ReservoirPK requires numeric operations (MAX, multiplication, casting to bigint).
+///
+/// # Returns
+/// - `Ok(pk_name)` if a numeric primary key is found
+/// - `Err(_)` if:
+///   - No primary key exists
+///   - Primary key is non-numeric (UUID, text, composite, etc.)
+///   - Primary key has multiple columns (composite key)
+///
+/// # Excluded Types
+/// Non-numeric PKs that will cause this to return Err:
+/// - UUID primary keys
+/// - TEXT/VARCHAR primary keys
+/// - DATE/TIMESTAMP primary keys
+/// - Composite primary keys
+///
+/// These tables will automatically fall back to TABLESAMPLE or Random strategies.
 async fn find_primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<String, sqlx::Error> {
     let pk: Option<String> = sqlx::query_scalar(
         r#"
           SELECT a.attname
           FROM pg_index i
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          JOIN pg_type t ON t.oid = a.atttypid
           WHERE i.indrelid = ($1 || '.' || $2)::regclass
             AND i.indisprimary
+            AND t.typcategory = 'N'
           LIMIT 1
           "#,
     )

@@ -1,5 +1,7 @@
 use pgdrift::commands::analyze;
 use pgdrift::output::OutputFormat;
+use pgdrift_core::drift::DriftIssue;
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::fixtures;
 use pgdrift_db::test_utils::TestDb;
 
@@ -19,6 +21,7 @@ async fn test_analyze_consistent_schema() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -43,6 +46,7 @@ async fn test_analyze_detects_type_inconsistency() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -67,6 +71,7 @@ async fn test_analyze_detects_ghost_keys() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -91,10 +96,74 @@ async fn test_analyze_handles_deep_nesting() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
     assert!(result.is_ok(), "Analyze command failed: {:?}", result.err());
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test analyze collapses deeply nested UUID and text_UUID ghost key paths.
+#[tokio::test]
+async fn test_analyze_collapses_deep_nested_dynamic_uuid_ghost_keys() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    fixtures::create_users_nested_dynamic_uuid_sanitized(&test_db.pool)
+        .await
+        .expect("Failed to create fixture");
+
+    let result = analyze::run_with_result(
+        test_db.database_url(),
+        "users_nested_dynamic",
+        "metadata",
+        1000,
+        PathFilter::new(),
+        None,
+    )
+    .await
+    .expect("Analyze command failed");
+
+    let dynamic_group = result.drift_issues.iter().find(|issue| {
+        matches!(
+            issue,
+            DriftIssue::DynamicKeyPattern {
+                path,
+                pattern,
+                key_count,
+                ..
+            } if path == "template_data.media.{dynamic}" && pattern == "uuid" && *key_count >= 2
+        )
+    });
+
+    assert!(
+        dynamic_group.is_some(),
+        "Expected a grouped dynamic UUID issue at template_data.media.{{dynamic}}"
+    );
+
+    let noisy_individual_uuid_ghosts: Vec<_> = result
+        .drift_issues
+        .iter()
+        .filter(|issue| {
+            matches!(issue, DriftIssue::GhostKey { .. })
+                && issue.path().starts_with("template_data.media.")
+                && (issue
+                    .path()
+                    .contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+                    || issue
+                        .path()
+                        .contains("text_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2")
+                    || issue
+                        .path()
+                        .contains("CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCC3"))
+        })
+        .collect();
+
+    assert!(
+        noisy_individual_uuid_ghosts.is_empty(),
+        "Expected per-key ghost noise to be collapsed for UUID-like dynamic keys"
+    );
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }
@@ -115,6 +184,7 @@ async fn test_analyze_with_schema_prefix() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -144,6 +214,7 @@ async fn test_analyze_output_formats() {
             "metadata",
             1000,
             format.clone(),
+            PathFilter::new(),
         )
         .await;
 
@@ -170,6 +241,7 @@ async fn test_analyze_invalid_table() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -194,6 +266,7 @@ async fn test_analyze_invalid_column() {
         "nonexistent_column",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -225,6 +298,7 @@ async fn test_analyze_empty_column() {
         "data",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -255,6 +329,7 @@ async fn test_analyze_detects_schema_evolution() {
         "data",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -272,6 +347,7 @@ async fn test_analyze_invalid_database_url() {
         "metadata",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -311,6 +387,7 @@ async fn test_analyze_all_null_column() {
         "data",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -364,6 +441,7 @@ async fn test_analyze_mixed_null_values() {
         "data",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -400,6 +478,7 @@ async fn test_analyze_sql_injection_table_name() {
             "metadata",
             1000,
             OutputFormat::Json,
+            PathFilter::new(),
         )
         .await;
 
@@ -440,6 +519,7 @@ async fn test_analyze_sql_injection_column_name() {
             attempt,
             1000,
             OutputFormat::Json,
+            PathFilter::new(),
         )
         .await;
 
@@ -502,6 +582,7 @@ async fn test_analyze_large_json_documents() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -568,6 +649,7 @@ async fn test_analyze_unicode_and_special_chars() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -611,6 +693,7 @@ async fn test_analyze_empty_json_objects() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -664,6 +747,7 @@ async fn test_analyze_mixed_empty_objects() {
         "data",
         1000,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -715,6 +799,7 @@ async fn test_analyze_extreme_nesting_depth() {
         "data",
         10,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -767,6 +852,7 @@ async fn test_analyze_field_type_mutation() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -822,6 +908,7 @@ async fn test_analyze_mixed_type_arrays() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -877,6 +964,7 @@ async fn test_analyze_inconsistent_nesting_levels() {
         "data",
         100,
         OutputFormat::Json,
+        PathFilter::new(),
     )
     .await;
 
@@ -885,6 +973,158 @@ async fn test_analyze_inconsistent_nesting_levels() {
         "Should handle inconsistent nesting: {:?}",
         result.err()
     );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test analyze with prefix wildcard path filtering (*.suffix patterns)
+#[tokio::test]
+async fn test_analyze_with_prefix_wildcard_filter() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE uuid_records (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert records with UUID-keyed objects that have timestamp fields
+    for i in 0..100 {
+        let uuid1 = format!("550e8400-e29b-41d4-a716-44665544{:04}", i);
+        let uuid2 = format!("6ba7b810-9dad-11d1-80b4-00c04fd4{:04}", i);
+
+        let data = serde_json::json!({
+            uuid1: {
+                "name": format!("Record {}", i),
+                "value": i * 10,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-02T00:00:00Z"
+            },
+            uuid2: {
+                "status": "active",
+                "count": i,
+                "created_at": "2024-01-01T00:00:00Z",
+                "deleted_at": "2024-01-03T00:00:00Z"
+            },
+            "metadata": {
+                "created_at": "2024-01-01T00:00:00Z",
+                "important_field": "should_be_analyzed"
+            }
+        });
+
+        sqlx::query("INSERT INTO uuid_records (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert uuid record");
+    }
+
+    // Create filter to ignore all timestamp fields using prefix wildcards
+    let mut filter = PathFilter::new();
+    filter.add_patterns(vec![
+        "*.created_at".to_string(),
+        "*.updated_at".to_string(),
+        "*.deleted_at".to_string(),
+    ]);
+
+    // Analyze with prefix wildcard filter
+    let result = analyze::run(
+        test_db.database_url(),
+        "uuid_records",
+        "data",
+        100,
+        OutputFormat::Json,
+        filter,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should handle prefix wildcard filtering: {:?}",
+        result.err()
+    );
+
+    // The analysis should NOT include any *_at fields (all filtered)
+    // but SHOULD include name, value, status, count, important_field
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+/// Test analyze with combined suffix and prefix wildcard filtering
+#[tokio::test]
+async fn test_analyze_with_combined_wildcard_filters() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    sqlx::query(
+        "CREATE TABLE combined_filter_test (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL
+        )",
+    )
+    .execute(&test_db.pool)
+    .await
+    .expect("Failed to create table");
+
+    // Insert records with various patterns
+    for i in 0..100 {
+        let data = serde_json::json!({
+            "user": {
+                "name": format!("User {}", i),
+                "email": format!("user{}@example.com", i),
+                "created_at": "2024-01-01T00:00:00Z",
+                "internal": {
+                    "token": "secret",
+                    "api_key": "secret"
+                }
+            },
+            "record_123": {
+                "value": i,
+                "created_at": "2024-01-01T00:00:00Z"
+            },
+            "debug": {
+                "log": "debugging info",
+                "trace": "stack trace"
+            }
+        });
+
+        sqlx::query("INSERT INTO combined_filter_test (data) VALUES ($1)")
+            .bind(data)
+            .execute(&test_db.pool)
+            .await
+            .expect("Failed to insert combined filter test data");
+    }
+
+    // Create filter with both suffix wildcards (prefix.*) and prefix wildcards (*.suffix)
+    let mut filter = PathFilter::new();
+    filter.add_patterns(vec![
+        "user.internal.*".to_string(), // Suffix wildcard - filters user.internal and children
+        "debug.*".to_string(),         // Suffix wildcard - filters debug and children
+        "*.created_at".to_string(),    // Prefix wildcard - filters all created_at fields
+    ]);
+
+    // Analyze with combined filters
+    let result = analyze::run(
+        test_db.database_url(),
+        "combined_filter_test",
+        "data",
+        100,
+        OutputFormat::Json,
+        filter,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Should handle combined wildcard filtering: {:?}",
+        result.err()
+    );
+
+    // Analysis should include: user.name, user.email, record_123.value
+    // Analysis should NOT include: user.internal.*, debug.*, *.created_at
 
     test_db.cleanup().await.expect("Failed to cleanup");
 }

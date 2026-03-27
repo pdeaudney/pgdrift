@@ -2,11 +2,29 @@ use crate::output::{ColumnScanResult, OutputFormat, ScanAllResult};
 use anyhow::{Context, Result};
 use pgdrift_core::analyzer::JsonAnalyzer;
 use pgdrift_core::drift::{DriftConfig, DriftIssue, Severity, detect_drift};
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::{ConnectionPool, Sampler, discover_jsonb_columns};
 
 /// Run scan-all command to analyze all JSONB columns in the given DB
-pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -> Result<()> {
-    let conn = ConnectionPool::new(database_url)
+pub async fn run(
+    database_url: &str,
+    sample_size: usize,
+    format: OutputFormat,
+    schema_filter: Option<String>,
+    table_filter: Option<String>,
+    filter: PathFilter,
+    pool_max_lifetime_secs: Option<u64>,
+) -> Result<()> {
+    // Show filter info if patterns are active
+    if !filter.patterns().is_empty() {
+        println!(
+            "Applying {} ignore pattern(s) to all columns: {}\n",
+            filter.patterns().len(),
+            filter.patterns().join(", ")
+        );
+    }
+
+    let conn = ConnectionPool::new_with_max_lifetime_secs(database_url, pool_max_lifetime_secs)
         .await
         .context("Failed to connect to the database")?;
 
@@ -14,9 +32,19 @@ pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -
         .await
         .context("Failed to test the database connection")?;
 
-    let columns = discover_jsonb_columns(conn.pool())
+    let mut columns = discover_jsonb_columns(conn.pool())
         .await
         .context("Failed to discover JSONB columns")?;
+
+    // Apply schema filter if provided
+    if let Some(ref schema) = schema_filter {
+        columns.retain(|col| col.schema == *schema);
+    }
+
+    // Apply table filter if provided
+    if let Some(ref table) = table_filter {
+        columns.retain(|col| col.table == *table);
+    }
 
     if columns.is_empty() {
         println!("No JSONB columns found in the database.");
@@ -37,14 +65,16 @@ pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -
             col.schema, col.column, col.table
         );
 
-        match analyze_column(
-            conn.pool(),
-            &col.schema,
-            &col.table,
-            &col.column,
+        match analyze_column(AnalyzeColumnConfig {
+            pool: conn.pool(),
+            schema: &col.schema,
+            table: &col.table,
+            column: &col.column,
+            estimated_rows: col.estimated_rows,
             sample_size,
-            &config,
-        )
+            config: &config,
+            filter: &filter,
+        })
         .await
         {
             Ok((samples_analyzed, drift_issues)) => {
@@ -108,15 +138,29 @@ pub async fn run(database_url: &str, sample_size: usize, format: OutputFormat) -
     Ok(())
 }
 
-async fn analyze_column(
-    pool: &sqlx::PgPool,
-    schema: &str,
-    table: &str,
-    column: &str,
+/// Configuration for analyzing a single column
+struct AnalyzeColumnConfig<'a> {
+    pool: &'a sqlx::PgPool,
+    schema: &'a str,
+    table: &'a str,
+    column: &'a str,
+    estimated_rows: Option<i64>,
     sample_size: usize,
-    config: &DriftConfig,
-) -> Result<(usize, Vec<DriftIssue>)> {
-    let sampler = Sampler::new(pool, schema, table, None, sample_size)
+    config: &'a DriftConfig,
+    filter: &'a PathFilter,
+}
+
+async fn analyze_column(config: AnalyzeColumnConfig<'_>) -> Result<(usize, Vec<DriftIssue>)> {
+    let pool = config.pool;
+    let schema = config.schema;
+    let table = config.table;
+    let column = config.column;
+    let estimated_rows = config.estimated_rows;
+    let sample_size = config.sample_size;
+    let drift_config = config.config;
+    let filter = config.filter;
+    // Use estimated_rows from discovery to avoid expensive COUNT(*) queries
+    let sampler = Sampler::new(pool, schema, table, estimated_rows, sample_size)
         .await
         .context("Failed to create sampler")?
         .show_progress(false);
@@ -124,18 +168,26 @@ async fn analyze_column(
     let samples = sampler
         .sample(pool, schema, table, column)
         .await
-        .context("Failed to sample data")?;
+        .with_context(|| {
+            format!(
+                "Failed to sample data from {}.{}.{} using strategy: {}",
+                schema,
+                table,
+                column,
+                sampler.strategy_info()
+            )
+        })?;
 
     if samples.is_empty() {
         anyhow::bail!("No samples found in the column");
     }
 
-    let mut analyzer = JsonAnalyzer::new();
+    let mut analyzer = JsonAnalyzer::with_filter(filter.clone());
     for sample in &samples {
         analyzer.analyze(sample);
     }
     let stats = analyzer.finalize();
-    let drift_issues = detect_drift(&stats, config);
+    let drift_issues = detect_drift(&stats, drift_config);
 
     Ok((samples.len(), drift_issues))
 }

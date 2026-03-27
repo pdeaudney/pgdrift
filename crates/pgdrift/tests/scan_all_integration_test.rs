@@ -1,5 +1,6 @@
 use pgdrift::commands::scan_all;
 use pgdrift::output::OutputFormat;
+use pgdrift_core::filter::PathFilter;
 use pgdrift_db::fixtures;
 use pgdrift_db::test_utils::TestDb;
 
@@ -15,7 +16,16 @@ async fn test_scan_all_single_column() {
         .await
         .expect("Failed to create fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -43,7 +53,16 @@ async fn test_scan_all_multiple_columns() {
         .await
         .expect("Failed to create sparse users fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -67,7 +86,16 @@ async fn test_scan_all_with_drift_issues() {
         .await
         .expect("Failed to create ghost keys fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -83,7 +111,16 @@ async fn test_scan_all_no_columns() {
     let test_db = TestDb::new().await.expect("Failed to create test database");
 
     // Don't create any JSONB columns
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -106,7 +143,16 @@ async fn test_scan_all_table_format() {
         .await
         .expect("Failed to create fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Table).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Table,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -125,7 +171,16 @@ async fn test_scan_all_markdown_format() {
         .await
         .expect("Failed to create fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Markdown).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Markdown,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -152,6 +207,10 @@ async fn test_scan_all_with_custom_sample_size() {
         test_db.database_url(),
         100, // small sample size
         OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
     )
     .await;
 
@@ -174,6 +233,10 @@ async fn test_scan_all_invalid_database_url() {
         "postgres://invalid:invalid@localhost:5432/invalid",
         1000,
         OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
     )
     .await;
 
@@ -209,7 +272,16 @@ async fn test_scan_all_continues_on_column_error() {
         .expect("Failed to insert data");
 
     // scan_all should succeed overall even if one column fails
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -232,7 +304,16 @@ async fn test_scan_all_with_schema_evolution() {
         .await
         .expect("Failed to create fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -251,7 +332,16 @@ async fn test_scan_all_with_deep_nesting() {
         .await
         .expect("Failed to create fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -279,11 +369,155 @@ async fn test_scan_all_aggregates_drift_correctly() {
         .await
         .expect("Failed to create ghost keys fixture");
 
-    let result = scan_all::run(test_db.database_url(), 1000, OutputFormat::Json).await;
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
         "Scan all command failed: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+// ============================================================================
+// Schema and Table Filtering Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_scan_all_filter_by_schema() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    // Create tables in public schema
+    fixtures::create_users_consistent(&test_db.pool)
+        .await
+        .expect("Failed to create users fixture");
+
+    fixtures::create_products_schema_evolution(&test_db.pool)
+        .await
+        .expect("Failed to create products fixture");
+
+    // Filter to only public schema (which is the default schema for our fixtures)
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        Some("public".to_string()),
+        None,
+        PathFilter::new(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Scan all with schema filter failed: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+#[tokio::test]
+async fn test_scan_all_filter_by_table() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    // Create multiple tables
+    fixtures::create_users_consistent(&test_db.pool)
+        .await
+        .expect("Failed to create users fixture");
+
+    fixtures::create_products_schema_evolution(&test_db.pool)
+        .await
+        .expect("Failed to create products fixture");
+
+    // Filter to only users table
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        Some("users".to_string()),
+        PathFilter::new(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Scan all with table filter failed: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+#[tokio::test]
+async fn test_scan_all_filter_by_schema_and_table() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    // Create multiple tables
+    fixtures::create_users_consistent(&test_db.pool)
+        .await
+        .expect("Failed to create users fixture");
+
+    fixtures::create_products_schema_evolution(&test_db.pool)
+        .await
+        .expect("Failed to create products fixture");
+
+    // Filter to specific schema and table
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        Some("public".to_string()),
+        Some("users".to_string()),
+        PathFilter::new(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Scan all with schema and table filter failed: {:?}",
+        result.err()
+    );
+
+    test_db.cleanup().await.expect("Failed to cleanup");
+}
+
+#[tokio::test]
+async fn test_scan_all_filter_no_matches() {
+    let test_db = TestDb::new().await.expect("Failed to create test database");
+
+    fixtures::create_users_consistent(&test_db.pool)
+        .await
+        .expect("Failed to create users fixture");
+
+    // Filter to a non-existent table
+    let result = scan_all::run(
+        test_db.database_url(),
+        1000,
+        OutputFormat::Json,
+        None,
+        Some("nonexistent_table".to_string()),
+        PathFilter::new(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Scan all should succeed with no matching columns: {:?}",
         result.err()
     );
 

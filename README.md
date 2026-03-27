@@ -15,6 +15,8 @@ When you store JSON documents in PostgreSQL JSONB columns, the schema isn't enfo
 - Detect missing required fields (expected fields present in 80-95% of records)
 - Analyze schema evolution patterns
 - **Generate PostgreSQL index recommendations** for JSONB fields (B-tree, GIN, Partial)
+- **Generate migration guides** to extract JSONB fields to native PostgreSQL columns
+- **Generate JSON Schema** definitions with pg_jsonschema CHECK constraints
 - **Scan all JSONB columns** at once for database-wide drift analysis
 - Generate reports in multiple formats (table, JSON, markdown)
 
@@ -77,7 +79,7 @@ cargo install --path crates/pgdrift
 
 ## Usage
 
-pgdrift provides four main commands: `discover`, `analyze`, `scan-all`, and `index`.
+pgdrift provides six main commands: `discover`, `analyze`, `scan-all`, `index`, `migrate`, and `schema`.
 
 ### Discovering JSONB Columns
 
@@ -203,6 +205,27 @@ Column Details:
   • public.users.metadata
 ```
 
+#### Filtering by Schema or Table
+
+You can filter scan-all to analyze only specific schemas or tables:
+
+**Filter by schema:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --schema public
+```
+
+**Filter by table:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --table users
+```
+
+**Filter by both schema and table:**
+```bash
+pgdrift scan-all --database-url $DATABASE_URL --schema public --table users
+```
+
+This is useful when you have a large database and only want to analyze specific tables or schemas, or when you want to focus on a particular area of your database.
+
 ### Generating Index Recommendations
 
 Get PostgreSQL index recommendations for JSONB fields:
@@ -254,6 +277,353 @@ CREATE INDEX idx_users_metadata_prefs_theme
 Benefit: Reduces index size by only indexing rows where field exists
 ```
 
+### Generating Migration Guides
+
+Generate SQL migration scripts to extract stable JSONB fields to native PostgreSQL columns:
+
+```bash
+pgdrift migrate users metadata --database-url $DATABASE_URL
+```
+
+The migrate command analyzes JSONB fields and identifies candidates suitable for extraction to native columns based on density (how often the field appears) and type consistency. This improves query performance and enables better indexing.
+
+**Example output:**
+
+```
+Analyzing 5000 samples...
+
+Found 5 field(s) eligible for migration
+
+╭───────────────┬─────────────┬─────────────┬─────────┬──────────────────┬──────────┬──────────╮
+│ Field         │ Source Type │ Target Type │ Density │ Type Consistency │ Nullable │ Warnings │
+├───────────────┼─────────────┼─────────────┼─────────┼──────────────────┼──────────┼──────────┤
+│ email         │ String      │ TEXT        │ 100.0%  │ 100.0%           │ No       │ ✓        │
+│ age           │ Number      │ INTEGER     │ 98.0%   │ 95.2%            │ Yes      │ ⚠️ 1     │
+│ is_active     │ Boolean     │ BOOLEAN     │ 100.0%  │ 100.0%           │ No       │ ✓        │
+│ created_at    │ String      │ TIMESTAMP   │ 99.0%   │ 99.0%            │ Yes      │ ✓        │
+│ score         │ Number      │ NUMERIC     │ 85.0%   │ 100.0%           │ Yes      │ ✓        │
+╰───────────────┴─────────────┴─────────────┴─────────┴──────────────────┴──────────┴──────────╯
+
+⚠️ age:
+  • Warning Type inconsistency: 4.8% of values are STRING
+    Examples: "unknown", "N/A"
+
+--- Generated Migration SQL ---
+
+-- ⚠️  WARNING: This is a generated migration guide.
+-- ⚠️  REVIEW CAREFULLY before executing any statements.
+-- ⚠️  Test on a staging environment first.
+
+-- Step 1: Add new native columns
+ALTER TABLE public.users
+  ADD COLUMN email TEXT,
+  ADD COLUMN age INTEGER,
+  ADD COLUMN is_active BOOLEAN DEFAULT false,
+  ADD COLUMN created_at TIMESTAMP,
+  ADD COLUMN score NUMERIC(10,2);
+
+-- Step 2: Backfill data from JSONB
+UPDATE public.users SET
+  email = metadata->>'email',
+  age = (metadata->>'age')::INTEGER,
+  is_active = (metadata->>'is_active')::BOOLEAN,
+  created_at = (metadata->>'created_at')::TIMESTAMP,
+  score = (metadata->>'score')::NUMERIC;
+
+-- Step 3: Add NOT NULL constraints
+ALTER TABLE public.users
+  ALTER COLUMN email SET NOT NULL,
+  ALTER COLUMN is_active SET NOT NULL;
+
+-- Step 4: Create indexes on native columns
+CREATE INDEX idx_users_email ON public.users(email);
+CREATE INDEX idx_users_created_at ON public.users(created_at);
+
+-- WARNING: Field 'age' has type inconsistencies
+--   Recommendation: Clean data before migration
+```
+
+#### Migration Criteria
+
+Fields are considered good migration candidates when they meet these criteria:
+
+- **High density** (≥80% occurrence by default) - Field appears consistently across records
+- **Type consistent** (≥95% same type by default) - Safe to map to a native PostgreSQL type
+- **Scalar type** (String, Number, Boolean) - Not Object or Array
+- **Not filtered** - Not excluded via `--ignore-path` patterns
+
+You can adjust these thresholds:
+
+```bash
+# Lower thresholds to include more fields
+pgdrift migrate users metadata --min-density 0.6 --min-type-consistency 0.90
+
+# Stricter thresholds for high-confidence migrations only
+pgdrift migrate users metadata --min-density 0.95 --min-type-consistency 0.99
+```
+
+#### Type Mapping
+
+pgdrift automatically infers the best PostgreSQL type based on JSON type and observed data:
+
+| JSON Type | PostgreSQL Type | Decision Logic |
+|-----------|----------------|----------------|
+| String | TEXT or VARCHAR(n) | VARCHAR if max length < 255 chars |
+| Number | INTEGER, BIGINT, NUMERIC, DOUBLE | Based on range and decimal detection |
+| Boolean | BOOLEAN | Direct mapping |
+| Null | Nullable column | Adds NULL constraint |
+
+#### Output Formats
+
+Migration guides can be generated in multiple formats:
+
+**SQL format** (default): Executable migration SQL with warnings as comments
+
+```bash
+pgdrift migrate users metadata --format table > migration.sql
+```
+
+**JSON format**: Machine-readable for programmatic processing
+
+```bash
+pgdrift migrate users metadata --format json > migration.json
+```
+
+**Markdown format**: Human-readable guide for documentation
+
+```bash
+pgdrift migrate users metadata --format markdown > migration-guide.md
+```
+
+**Important:** The migrate command only generates SQL output files. It never executes migrations or modifies your database. Always review and test the generated SQL on a staging environment before applying to production.
+
+### Generating JSON Schemas
+
+Generate JSON Schema definitions (2020-12) with optional pg_jsonschema CHECK constraints:
+
+```bash
+pgdrift schema users metadata --database-url $DATABASE_URL
+```
+
+The schema command analyzes JSONB structure and generates a JSON Schema that describes the observed data structure, types, required fields, and validation rules.
+
+**Example output:**
+
+```
+Sampling Strategy: ReservoirPK (5000 samples via primary key)
+
+Analyzing 5000 samples...
+
+Generated schema with 8 properties
+Required fields: 2
+
+--- JSON Schema (2020-12) ---
+
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "public.users.metadata schema",
+  "description": "Auto-generated from 5000 samples",
+  "type": "object",
+  "properties": {
+    "email": {
+      "type": "string",
+      "format": "email",
+      "description": "Occurs in 100% of samples (5000/5000)"
+    },
+    "age": {
+      "type": "integer",
+      "minimum": 18,
+      "maximum": 95,
+      "description": "Occurs in 98% of samples (4900/5000)"
+    },
+    "is_active": {
+      "type": "boolean",
+      "description": "Occurs in 100% of samples (5000/5000)"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["admin", "user", "guest"],
+      "description": "Occurs in 95% of samples (4750/5000). Detected 3 distinct values."
+    },
+    "user_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Occurs in 100% of samples (5000/5000)"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Occurs in 99% of samples (4950/5000)"
+    },
+    "preferences": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "type": "string",
+          "enum": ["light", "dark"],
+          "description": "Occurs in 80% of samples (4000/5000)"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": ["email", "is_active"],
+  "additionalProperties": false
+}
+```
+
+#### Schema Inference Rules
+
+pgdrift automatically infers schema rules based on observed data:
+
+| Rule | Condition | JSON Schema Output |
+|------|-----------|-------------------|
+| Required field | Density ≥ 95% (default) | Added to `required` array |
+| Type constraint | Type consistency ≥ 95% | Set `type` field |
+| Multiple types | Type consistency < 95% | Use `oneOf` or `anyOf` |
+| Null allowed | null_count > 0 | Add `null` to type array |
+| Enum values | ≤ 10 distinct values | Set `enum` array |
+| Email pattern | Field named "email" + valid emails | Set `format: "email"` |
+| UUID pattern | String matching UUID format | Set `format: "uuid"` |
+| Date-time pattern | ISO 8601 timestamps | Set `format: "date-time"` |
+| URI pattern | Valid HTTP/HTTPS URLs | Set `format: "uri"` |
+| Number range | Numeric min/max observed | Set `minimum`, `maximum` |
+
+#### pg_jsonschema Integration
+
+Generate PostgreSQL CHECK constraints using the [pg_jsonschema](https://github.com/supabase/pg_jsonschema) extension:
+
+```bash
+pgdrift schema users metadata --format pg-jsonschema
+```
+
+**Example output:**
+
+```
+--- pg_jsonschema CHECK Constraint ---
+
+-- ⚠️  WARNING: Review this SQL before executing.
+-- ⚠️  Test the constraint on a staging environment first.
+-- ⚠️  This may reject existing data that violates the schema.
+
+-- Install pg_jsonschema extension (if not already installed)
+-- CREATE EXTENSION IF NOT EXISTS pg_jsonschema;
+
+-- Add CHECK constraint to enforce schema
+ALTER TABLE public.users
+  ADD CONSTRAINT users_metadata_schema_check
+  CHECK (
+    json_matches_schema(
+      '{
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "email": {"type": "string", "format": "email"},
+          "is_active": {"type": "boolean"}
+        },
+        "required": ["email", "is_active"],
+        "additionalProperties": false
+      }'::json,
+      metadata
+    )
+  );
+```
+
+This CHECK constraint validates all new and updated JSONB data against the schema, preventing drift from occurring in the future.
+
+#### Schema Options
+
+**Adjust required threshold:**
+
+```bash
+# Stricter: only mark fields present in 99%+ of records as required
+pgdrift schema users metadata --required-threshold 0.99
+
+# Relaxed: mark fields present in 80%+ as required
+pgdrift schema users metadata --required-threshold 0.8
+```
+
+**Strict mode** (reject additional properties):
+
+```bash
+pgdrift schema users metadata --strict
+```
+
+This sets `additionalProperties: false`, meaning the schema will reject any fields not explicitly defined in the properties list.
+
+**Save to file:**
+
+```bash
+# Save JSON Schema
+pgdrift schema users metadata > users-metadata-schema.json
+
+# Save pg_jsonschema SQL
+pgdrift schema users metadata --format pg-jsonschema > add-schema-check.sql
+```
+
+#### Installing pg_jsonschema
+
+To use the generated CHECK constraints, install the [pg_jsonschema extension](https://github.com/supabase/pg_jsonschema):
+
+```sql
+-- Requires PostgreSQL 12+
+CREATE EXTENSION IF NOT EXISTS pg_jsonschema;
+```
+
+**Note:** pg_jsonschema must be installed by a superuser. For cloud PostgreSQL services (AWS RDS, Azure, etc.), check if the extension is available or contact support.
+
+**Important:** The schema command only generates JSON Schema and SQL files. It never creates CHECK constraints or modifies your database. Always test generated schemas against existing data before applying constraints.
+
+#### Practical Usage Examples
+
+**Example 1: Enforce user metadata schema**
+
+```bash
+# Generate schema for user metadata
+pgdrift schema users metadata --strict > user-schema.json
+
+# Generate and apply pg_jsonschema constraint
+pgdrift schema users metadata --format pg-jsonschema --strict > add-user-schema.sql
+
+# Review the SQL, then apply (on staging first!)
+psql -h staging-db -f add-user-schema.sql
+
+# Test with valid data (should succeed)
+INSERT INTO users (name, metadata) VALUES (
+  'Alice',
+  '{"email": "alice@example.com", "is_active": true}'
+);
+
+# Test with invalid data (should fail)
+INSERT INTO users (name, metadata) VALUES (
+  'Bob',
+  '{"email": "not-an-email", "extra_field": "not allowed"}'  -- Fails: invalid format, strict mode
+);
+```
+
+**Example 2: Gradual schema migration**
+
+```bash
+# Start with relaxed schema (no additionalProperties restriction)
+pgdrift schema orders metadata > orders-schema-v1.json
+
+# After cleanup, switch to strict mode
+pgdrift schema orders metadata --strict --required-threshold 0.99 > orders-schema-v2.json
+
+# Compare schemas to understand the difference
+diff orders-schema-v1.json orders-schema-v2.json
+```
+
+**Example 3: Combine with path filtering**
+
+```bash
+# Generate schema excluding internal/debug fields
+pgdrift schema logs data \
+  --ignore-path "_internal.*" \
+  --ignore-path "debug.*" \
+  --format pg-jsonschema > logs-schema.sql
+```
+
 ### Output Formats
 
 pgdrift supports three output formats:
@@ -274,6 +644,163 @@ pgdrift analyze users metadata --format json > drift-report.json
 
 ```bash
 pgdrift analyze users metadata --format markdown > DRIFT_REPORT.md
+```
+
+### Filtering JSON Paths
+
+pgdrift allows you to exclude specific JSON paths from analysis, which is useful for ignoring sensitive data, debug fields, or internal metadata that you don't want to track.
+
+#### Using CLI Flags
+
+Ignore specific paths using the `--ignore-path` flag (can be used multiple times):
+
+```bash
+# Ignore a single path
+pgdrift analyze users metadata --ignore-path "user.internal.token"
+
+# Ignore multiple paths
+pgdrift analyze users metadata \
+  --ignore-path "user.internal.*" \
+  --ignore-path "debug.logs" \
+  --ignore-path "temp.session_data"
+```
+
+Works with all commands (analyze, index, migrate, schema, scan-all):
+
+```bash
+# Generate index recommendations, ignoring internal fields
+pgdrift index users metadata --ignore-path "internal.*"
+
+# Generate migration guide, ignoring sensitive fields
+pgdrift migrate users metadata --ignore-path "internal.*" --ignore-path "debug.*"
+
+# Generate JSON schema, excluding temporary fields
+pgdrift schema users metadata --ignore-path "temp.*"
+
+# Scan all columns, ignoring debug and temporary data
+pgdrift scan-all --database-url $DATABASE_URL \
+  --ignore-path "debug.*" \
+  --ignore-path "temp.*"
+```
+
+#### Using a Configuration File
+
+Create a `.pgdrift-ignore.toml` file in your project directory:
+
+```toml
+# .pgdrift-ignore.toml
+ignore_paths = [
+    "user.internal.*",      # Ignore all internal user data
+    "metadata.debug.*",     # Ignore debug metadata
+    "temp.session_data",    # Ignore specific temp field
+    "analytics.raw_events", # Ignore raw analytics data
+]
+```
+
+pgdrift automatically loads this file if it exists:
+
+```bash
+# Uses .pgdrift-ignore.toml automatically
+pgdrift analyze users metadata
+```
+
+You can also specify a custom config file location:
+
+```bash
+pgdrift analyze users metadata --ignore-config ./custom-ignore.toml
+```
+
+#### Pattern Matching
+
+pgdrift supports three types of patterns:
+
+**Exact match**: Matches only the specific path
+
+```toml
+ignore_paths = ["user.email"]
+```
+
+- Filters: `user.email`
+- Keeps: `user.email.domain`, `user.name`
+
+**Suffix wildcard**: Matches a path and all its children
+
+```toml
+ignore_paths = ["user.internal.*"]
+```
+
+- Filters: `user.internal`, `user.internal.id`, `user.internal.token`, `user.internal.metadata.secret`
+- Keeps: `user.email`, `user.name`, `user.external`
+
+**Prefix wildcard**: Matches any path ending with the specified suffix
+
+```toml
+ignore_paths = ["*.date_created", "*.timestamp"]
+```
+
+- Filters: `user.date_created`, `550e8400-e29b-41d4-a716-446655440000.date_created`, `record.timestamp`, `event.payload.timestamp`
+- Keeps: `user.date_updated`, `date_created.something`, `timestamp_tz`
+
+This is particularly useful for ignoring fields across UUID-keyed objects or standardized timestamp fields.
+
+**Important notes:**
+
+- Patterns are case-sensitive
+- Suffix wildcards match array notation (e.g., `internal.*` does NOT match `items[].name`)
+- Prefix wildcards DO match array notation (e.g., `*.name` matches `items[].name`)
+- CLI flags and TOML patterns are merged (not replaced)
+
+#### Common Use Cases
+
+**Ignoring sensitive data:**
+
+```toml
+ignore_paths = [
+    "user.ssn",
+    "payment.credit_card",
+    "credentials.*",
+]
+```
+
+**Ignoring debug/internal fields:**
+
+```toml
+ignore_paths = [
+    "debug.*",
+    "internal.*",
+    "_metadata.*",
+]
+```
+
+**Ignoring temporary or cache data:**
+
+```toml
+ignore_paths = [
+    "temp.*",
+    "cache.*",
+    "session_data",
+]
+```
+
+**Ignoring timestamp fields across all records:**
+
+```toml
+ignore_paths = [
+    "*.created_at",
+    "*.updated_at",
+    "*.deleted_at",
+    "*.last_modified",
+]
+```
+
+This is useful when you have UUID-keyed JSONB objects where each UUID has its own timestamp fields that you want to exclude from drift analysis.
+
+**Combining CLI and file:**
+
+```bash
+# .pgdrift-ignore.toml has: ["internal.*", "debug.*"]
+# This adds "temp.*" to the filter list
+pgdrift analyze users metadata --ignore-path "temp.*"
 ```
 
 ### Adaptive Sampling Strategies
@@ -374,8 +901,8 @@ cargo test -p pgdrift
 
 Current test suite includes:
 
-- **149 total tests** (88 unit tests + 61 integration tests)
-- Unit tests for JSON analysis, drift detection, sampling strategies, index recommendations, and field categorization
+- **228 total tests** (118 unit tests + 110 integration tests)
+- Unit tests for JSON analysis, drift detection, sampling strategies, index recommendations, migration analysis, schema generation, and field categorization
 - Integration tests against real PostgreSQL databases using testcontainers
 - Edge case testing for SQL injection, Unicode handling, extreme nesting, and mixed types
 
@@ -386,6 +913,8 @@ cargo test --test integration_test
 cargo test --test analyze_integration_test
 cargo test --test discover_integration_test
 cargo test --test index_integration_test
+cargo test --test migrate_integration_test
+cargo test --test schema_integration_test
 cargo test --test scan_all_integration_test
 ```
 
@@ -454,6 +983,27 @@ export DATABASE_URL="postgres://readonly_user:pass@prod.example.com:5432/prod_db
 pgdrift analyze users metadata
 ```
 
+Optional pool/session tuning (useful when the server enforces short `session_timeout`):
+
+```bash
+export PGDRIFT_POOL_MAX_CONNECTIONS=5
+export PGDRIFT_POOL_MAX_LIFETIME_SECS=45
+export PGDRIFT_POOL_IDLE_TIMEOUT_SECS=15
+export PGDRIFT_POOL_ACQUIRE_TIMEOUT_SECS=30
+```
+
+Set `PGDRIFT_POOL_MAX_LIFETIME_SECS` lower than your PostgreSQL `session_timeout` so pooled
+connections are recycled before the server terminates them.
+
+You can also set max lifetime per run with a global CLI flag (applies to all subcommands, including `schema`):
+
+```bash
+pgdrift analyze users metadata --pool-max-lifetime-secs 45
+pgdrift schema users metadata --pool-max-lifetime-secs 45
+```
+
+`--pool-max-lifetime-secs` overrides `PGDRIFT_POOL_MAX_LIFETIME_SECS`.
+
 ## Performance
 
 pgdrift is designed to handle large-scale databases efficiently:
@@ -482,12 +1032,19 @@ pgdrift is under active development. Completed and planned features:
 - ✅ Scan-all command for database-wide analysis
 - ✅ Multiple output formats (table, JSON, markdown)
 
+**v0.2.0 - Current** ✅
+
+- ✅ Migration guide generation (JSONB → native columns)
+- ✅ JSON Schema generation (2020-12)
+- ✅ pg_jsonschema CHECK constraint support
+- ✅ Path filtering with .pgdrift-ignore.toml config
+
 **Future Releases**
 
 - CI/CD integration mode for drift detection in pipelines
-- Migration SQL generation (Pro feature)
 - Web dashboard for visual analysis
 - Support for additional database types (MySQL JSON, MongoDB)
+- Schema evolution tracking and diff generation
 
 ## Contributing
 
@@ -517,5 +1074,6 @@ Built with:
 - [clap](https://github.com/clap-rs/clap) - Command line argument parsing
 - [tabled](https://github.com/zhiburt/tabled) - ASCII table formatting
 - [serde_json](https://github.com/serde-rs/json) - JSON parsing and manipulation
+- [jsonschema](https://github.com/Stranger6667/jsonschema-rs) - JSON Schema validation (testing)
 
 Inspired by the need for better tooling around semi-structured data in relational databases.

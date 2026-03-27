@@ -223,7 +223,7 @@ fn create_consolidated_gin_recommendation(
     };
 
     IndexRecommendation {
-        field_path: primary_stats.path.clone(),
+        field_path: primary_stats.path.to_string(),
         index_type: IndexType::Gin,
         priority,
         reason,
@@ -251,7 +251,7 @@ fn create_partial_gin_recommendation(
     );
 
     IndexRecommendation {
-        field_path: stats.path.clone(),
+        field_path: stats.path.to_string(),
         index_type: IndexType::Partial,
         priority,
         reason: format!(
@@ -313,7 +313,7 @@ fn create_btree_extracted_recommendation(
     );
 
     IndexRecommendation {
-        field_path: stats.path.clone(),
+        field_path: stats.path.to_string(),
         index_type: IndexType::BTreeExtracted,
         priority,
         reason: format!(
@@ -380,9 +380,10 @@ fn escape_json_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn create_test_stats(path: &str, density: f64, occurrences: u64, total: u64) -> FieldStats {
-        let mut stats = FieldStats::new(path.to_string(), 1);
+        let mut stats = FieldStats::new(Arc::from(path), 1);
         stats.occurrences = occurrences;
         stats.total_samples = total;
         stats.density = density;

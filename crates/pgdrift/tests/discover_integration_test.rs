@@ -13,7 +13,7 @@ async fn test_discover_single_column() {
         .expect("Failed to create fixture");
 
     // Run discover command
-    let result = discover::run(test_db.database_url(), OutputFormat::Json).await;
+    let result = discover::run(test_db.database_url(), OutputFormat::Json, None).await;
 
     assert!(
         result.is_ok(),
@@ -43,7 +43,7 @@ async fn test_discover_multiple_columns() {
         .expect("Failed to create sparse users fixture");
 
     // Run discover command
-    let result = discover::run(test_db.database_url(), OutputFormat::Json).await;
+    let result = discover::run(test_db.database_url(), OutputFormat::Json, None).await;
 
     assert!(
         result.is_ok(),
@@ -69,7 +69,7 @@ async fn test_discover_output_formats() {
         OutputFormat::Json,
         OutputFormat::Markdown,
     ] {
-        let result = discover::run(test_db.database_url(), format.clone()).await;
+        let result = discover::run(test_db.database_url(), format.clone(), None).await;
 
         assert!(
             result.is_ok(),
@@ -100,7 +100,7 @@ async fn test_discover_no_jsonb_columns() {
     .expect("Failed to create table");
 
     // Run discover command - should succeed but find no columns
-    let result = discover::run(test_db.database_url(), OutputFormat::Json).await;
+    let result = discover::run(test_db.database_url(), OutputFormat::Json, None).await;
 
     assert!(
         result.is_ok(),
@@ -116,6 +116,7 @@ async fn test_discover_invalid_database_url() {
     let result = discover::run(
         "postgres://invalid:invalid@localhost:9999/invalid",
         OutputFormat::Json,
+        None,
     )
     .await;
 
@@ -133,7 +134,7 @@ async fn test_discover_excludes_system_schemas() {
 
     // The discover command should only find columns in the public schema,
     // not in pg_catalog or information_schema
-    let result = discover::run(test_db.database_url(), OutputFormat::Json).await;
+    let result = discover::run(test_db.database_url(), OutputFormat::Json, None).await;
 
     assert!(
         result.is_ok(),
@@ -158,7 +159,7 @@ async fn test_discover_different_jsonb_structures() {
         .expect("Failed to create type inconsistency fixture");
 
     // Run discover - should find both tables with different JSONB structures
-    let result = discover::run(test_db.database_url(), OutputFormat::Json).await;
+    let result = discover::run(test_db.database_url(), OutputFormat::Json, None).await;
 
     assert!(
         result.is_ok(),
